@@ -30,8 +30,14 @@ jobs:
             *.zip) unzip -q toolchain.dl -d "$OO_PS4_TOOLCHAIN" ;;
             *) tar -xzf toolchain.dl -C "$OO_PS4_TOOLCHAIN" ;;
           esac
-          chmod -R +x "$OO_PS4_TOOLCHAIN/bin/linux" || true
+          F=$(find "$OO_PS4_TOOLCHAIN" -maxdepth 4 -name link.x | head -1)
+          if [ -z "$F" ]; then echo "No encontre link.x"; find "$OO_PS4_TOOLCHAIN" -maxdepth 3 | head -50; exit 1; fi
+          ROOT=$(dirname "$F")
+          echo "Raiz del toolchain: $ROOT"
+          if [ "$ROOT" != "$OO_PS4_TOOLCHAIN" ]; then cp -a "$ROOT"/. "$OO_PS4_TOOLCHAIN"/; fi
+          chmod -R +x "$OO_PS4_TOOLCHAIN/bin" || true
           ls "$OO_PS4_TOOLCHAIN"
+          ls "$OO_PS4_TOOLCHAIN/include/c++/v1" | head -5
 
       - name: Descargar samples
         run: git clone --depth 1 --branch "$OO_VERSION" https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
