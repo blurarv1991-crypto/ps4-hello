@@ -45,8 +45,12 @@ jobs:
       - name: Compilar hello_world
         run: |
           cd src/samples/hello_world
+          mkdir -p sce_sys/about
+          R=$(find "$OO_PS4_TOOLCHAIN" ../.. -name right.sprx | head -1)
+          echo "right.sprx encontrado en: $R"
+          if [ -z "$R" ]; then echo "No hay right.sprx"; find "$OO_PS4_TOOLCHAIN" -maxdepth 3 -type d | head -40; exit 1; fi
+          cp "$R" sce_sys/about/right.sprx
           make
-
       - name: Reunir el pkg
         run: |
           mkdir -p salida
