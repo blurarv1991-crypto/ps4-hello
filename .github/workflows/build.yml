@@ -1,0 +1,44 @@
+name: Build PKG
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      OO_VERSION: v0.5.4
+      OO_PS4_TOOLCHAIN: ${{ github.workspace }}/OpenOrbis
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
+      DOTNET_ROLL_FORWARD: Major
+    steps:
+      - name: Instalar clang y lld
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+
+      - name: Descargar toolchain
+        run: |
+          mkdir -p "$OO_PS4_TOOLCHAIN"
+          curl -L --fail "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/$OO_VERSION/$OO_VERSION.tar.gz" | tar -xz -C "$OO_PS4_TOOLCHAIN"
+          chmod -R +x "$OO_PS4_TOOLCHAIN/bin/linux"
+          ls "$OO_PS4_TOOLCHAIN"
+
+      - name: Descargar samples
+        run: git clone --depth 1 --branch "$OO_VERSION" https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
+
+      - name: Compilar hello_world
+        run: |
+          cd src/samples/hello_world
+          make
+
+      - name: Reunir el pkg
+        run: |
+          mkdir -p salida
+          find src -name "*.pkg" -exec cp {} salida/ \;
+          ls -la salida
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-pkg
+          path: salida/*.pkg
