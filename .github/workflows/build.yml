@@ -18,9 +18,19 @@ jobs:
 
       - name: Descargar toolchain
         run: |
+          curl -s https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/$OO_VERSION | grep browser_download_url | cut -d '"' -f 4 > assets.txt
+          echo "Archivos de la Release:"
+          cat assets.txt
+          URL=$(grep -i linux assets.txt | head -1)
+          if [ -z "$URL" ]; then URL=$(grep -E '\.(tar\.gz|zip)$' assets.txt | head -1); fi
+          echo "Usando: $URL"
+          curl -L --fail -o toolchain.dl "$URL"
           mkdir -p "$OO_PS4_TOOLCHAIN"
-          curl -L --fail "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/$OO_VERSION/$OO_VERSION.tar.gz" | tar -xz -C "$OO_PS4_TOOLCHAIN"
-          chmod -R +x "$OO_PS4_TOOLCHAIN/bin/linux"
+          case "$URL" in
+            *.zip) unzip -q toolchain.dl -d "$OO_PS4_TOOLCHAIN" ;;
+            *) tar -xzf toolchain.dl -C "$OO_PS4_TOOLCHAIN" ;;
+          esac
+          chmod -R +x "$OO_PS4_TOOLCHAIN/bin/linux" || true
           ls "$OO_PS4_TOOLCHAIN"
 
       - name: Descargar samples
