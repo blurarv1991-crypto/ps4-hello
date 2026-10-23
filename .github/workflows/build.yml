@@ -41,7 +41,10 @@ jobs:
 
       - name: Descargar samples
         run: git clone --depth 1 --branch "$OO_VERSION" https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
-
+      - name: Instalar libssl1.1
+        run: |
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb || wget -q http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
+          sudo dpkg -i libssl1.1_*.deb
       - name: Compilar hello_world
         run: |
           cd src/samples/hello_world
