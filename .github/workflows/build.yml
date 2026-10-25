@@ -41,10 +41,12 @@ jobs:
 
       - name: Descargar samples
         run: git clone --depth 1 --branch "$OO_VERSION" https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
+
       - name: Instalar libssl1.1
         run: |
           wget -q http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb || wget -q http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
           sudo dpkg -i libssl1.1_*.deb
+
       - name: Compilar hello_world
         run: |
           cd src/samples/hello_world
@@ -58,13 +60,14 @@ jobs:
           grep -n "icon0.png" Makefile
           sed -i 's|sce_sys/icon0.png"|sce_sys/icon0.png sce_module/libc.prx sce_module/libSceFios2.prx"|' Makefile
           make
+
       - name: Reunir el pkg
         run: |
           mkdir -p salida
-          find src -name "*.pkg" -exec cp {} salida/ \;
+          find src/samples/hello_world -name "*.pkg" -exec cp {} salida/ \;
           ls -la salida
 
-            - name: Subir artifact
+      - name: Subir artifact
         uses: actions/upload-artifact@v4
         with:
           name: hello-pkg
