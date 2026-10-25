@@ -9,11 +9,18 @@ jobs:
   ver:
     runs-on: ubuntu-latest
     steps:
-      - name: Mirar sample
+      - name: Mirar video
         run: |
           git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
           cd src/samples/SDL2
-          echo "ARCHIVOS:"
-          find . -type f | head -60
-          echo "TEXTOS:"
-          grep -rn -i "score|difficulty|game over" --include=*.cpp --include=*.c --include=*.h -E . | head -20
+          echo "TAMANO:"
+          ls -la video.mp4
+          echo "README:"
+          head -40 README.md
+          echo "USO EN CODIGO:"
+          grep -rIn -iE "video|mp4|ffmpeg|avcodec" SDL2 Makefile | head -20
+          echo "INFO DEL VIDEO:"
+          sudo apt-get install -y -qq ffmpeg > /dev/null 2>&1
+          ffprobe -hide_banner video.mp4 2>&1 | head -20
+          echo "FFMPEG EN EL REPO:"
+          find ../.. -iname "*avcodec*" -o -iname "*ffmpeg*" | head
