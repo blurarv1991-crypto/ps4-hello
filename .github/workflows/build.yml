@@ -8,7 +8,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      SAMPLE: audio-wav
+      SAMPLE: SDL2
       OO_VERSION: v0.5.4
       OO_PS4_TOOLCHAIN: ${{ github.workspace }}/OpenOrbis
       DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
