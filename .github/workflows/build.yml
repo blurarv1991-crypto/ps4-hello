@@ -64,8 +64,8 @@ jobs:
           find src -name "*.pkg" -exec cp {} salida/ \;
           ls -la salida
 
-      - name: Subir artifact
-        usted: actions/upload-artifact@v4
+            - name: Subir artifact
+        uses: actions/upload-artifact@v4
         with:
           name: hello-pkg
           path: salida/*.pkg
