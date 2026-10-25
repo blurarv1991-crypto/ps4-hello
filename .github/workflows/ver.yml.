@@ -1,0 +1,19 @@
+name: Ver sample SDL2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/ver.yml'
+
+jobs:
+  ver:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirar sample
+        run: |
+          git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
+          cd src/samples/SDL2
+          echo "ARCHIVOS:"
+          find . -type f | head -60
+          echo "TEXTOS:"
+          grep -rn -i "score|difficulty|game over" --include=*.cpp --include=*.c --include=*.h -E . | head -20
