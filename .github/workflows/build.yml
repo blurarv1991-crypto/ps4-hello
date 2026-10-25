@@ -42,7 +42,10 @@ jobs:
 
       - name: Descargar samples
         run: git clone --depth 1 --branch "$OO_VERSION" https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
-
+      - name: Personalizar juego
+        run: |
+          sed -i 's/Score: /Puntos: /g' src/samples/SDL2/SDL2/*.cpp
+          grep -rn "Puntos" src/samples/SDL2/SDL2 | head
       - name: Listar samples
         run: |
           echo "SAMPLES DISPONIBLES:"
