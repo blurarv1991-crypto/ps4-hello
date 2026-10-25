@@ -53,6 +53,10 @@ jobs:
           echo "right.sprx encontrado en: $R"
           if [ -z "$R" ]; then echo "No hay right.sprx"; find "$OO_PS4_TOOLCHAIN" -maxdepth 3 -type d | head -40; exit 1; fi
           cp "$R" sce_sys/about/right.sprx
+          mkdir -p sce_module
+          for f in libc.prx libSceFios2.prx; do P=$(find "$OO_PS4_TOOLCHAIN" ../.. -name $f | head -1); echo "$f: $P"; if [ -n "$P" ]; then cp "$P" sce_module/$f; fi; done
+          grep -n "icon0.png" Makefile
+          sed -i 's|sce_sys/icon0.png"|sce_sys/icon0.png sce_module/libc.prx sce_module/libSceFios2.prx"|' Makefile
           make
       - name: Reunir el pkg
         run: |
@@ -61,7 +65,7 @@ jobs:
           ls -la salida
 
       - name: Subir artifact
-        uses: actions/upload-artifact@v4
+        usted: actions/upload-artifact@v4
         with:
           name: hello-pkg
           path: salida/*.pkg
