@@ -8,6 +8,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
+      SAMPLE: hello_world
       OO_VERSION: v0.5.4
       OO_PS4_TOOLCHAIN: ${{ github.workspace }}/OpenOrbis
       DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
@@ -42,14 +43,21 @@ jobs:
       - name: Descargar samples
         run: git clone --depth 1 --branch "$OO_VERSION" https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
 
+      - name: Listar samples
+        run: |
+          echo "SAMPLES DISPONIBLES:"
+          ls src/samples
+          echo "LIBRERIAS DEL TOOLCHAIN:"
+          ls "$OO_PS4_TOOLCHAIN/lib" | head -60
+
       - name: Instalar libssl1.1
         run: |
           wget -q http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb || wget -q http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
           sudo dpkg -i libssl1.1_*.deb
 
-      - name: Compilar hello_world
+      - name: Compilar sample
         run: |
-          cd src/samples/hello_world
+          cd src/samples/$SAMPLE
           mkdir -p sce_sys/about
           R=$(find "$OO_PS4_TOOLCHAIN" ../.. -name right.sprx | head -1)
           echo "right.sprx encontrado en: $R"
@@ -64,7 +72,7 @@ jobs:
       - name: Reunir el pkg
         run: |
           mkdir -p salida
-          find src/samples/hello_world -name "*.pkg" -exec cp {} salida/ \;
+          find src/samples/$SAMPLE -name "*.pkg" -exec cp {} salida/ \;
           ls -la salida
 
       - name: Subir artifact
