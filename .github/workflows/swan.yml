@@ -4,11 +4,13 @@ on:
   push:
     paths:
       - '.github/workflows/swan.yml'
+      - 'frontend/**'
 
 jobs:
   ver:
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - name: Preparar
         run: |
           git clone --depth 1 https://github.com/libretro/swanstation.git swan
@@ -60,6 +62,13 @@ jobs:
           if ! clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I swan/src $INC $X $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 -A2 "error:" e.txt | sed 's/.*error: //' | cut -c1-110 || true; fi
           done
           echo OBJETOS_LIBRETRO; ls obj | grep -c "^lib_"
+      - name: Frontend
+        run: |
+          OO=$PWD/tc/OpenOrbis/PS4Toolchain
+          curl -sL -o frontend/stb_easy_font.h https://raw.githubusercontent.com/nothings/stb/master/stb_easy_font.h
+          ls -la frontend
+          if ! clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I frontend frontend/main.cpp -o obj/frontend_main.o > e.txt 2>&1; then echo FALLA_MAIN; grep -m3 -A2 "error:" e.txt | cut -c1-120 || true; fi
+          echo OBJ_MAIN; ls obj | grep -c "^frontend_main"
       - name: Enlazar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
@@ -67,17 +76,19 @@ jobs:
           cp obj/*.o obj2/
           rm -f obj2/*gpu_hw_vulkan* obj2/*gpu_hw_opengl*
           L="ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 --allow-multiple-definition --no-demangle -L$OO/lib $OO/lib/crt1.o"
-          echo 'int main(void) { return 0; }' > stub.c
+          LIBS="-lc -lkernel -lc++ -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSDL2"
+          : > stub.c
           for i in 1 2 3 4 5; do
           clang --target=x86_64-pc-freebsd12-elf -fPIC -c -w -isysroot $OO -isystem $OO/include stub.c -o obj2/stub.o
-          $L obj2/*.o -lc -lkernel -lc++ -o p2.elf > l2.txt 2>&1 || true
+          $L obj2/*.o $LIBS -o p3.elf > l2.txt 2>&1 || true
           grep "undefined symbol" l2.txt | sed 's/.*undefined symbol: //' | sort -u > s2.txt || true
           N=$(wc -l < s2.txt)
           echo ITER_$i PENDIENTES_$N
           if [ "$N" = "0" ]; then break; fi
           while read s; do case $s in GLAD_*|glad_*) echo "int $s;";; *) echo "void $s(void) {}";; esac; done < s2.txt >> stub.c
           done
-          echo ELF; ls -la p2.elf 2>&1 | cut -c1-80
-          echo RETRO_RUN; nm p2.elf 2>/dev/null | grep -c " T retro_run" || true
+          echo ELF; ls -la p3.elf 2>&1 | cut -c1-80
+          echo RETRO_RUN; nm p3.elf 2>/dev/null | grep -c " T retro_run" || true
+          echo MAIN; nm p3.elf 2>/dev/null | grep -c " T main" || true
           echo QUEDAN; head -12 s2.txt | cut -c1-90
           echo PRIMERAS; head -3 l2.txt | cut -c1-150
