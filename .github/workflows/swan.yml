@@ -15,14 +15,16 @@ jobs:
           curl -sL -o tc.tgz https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz
           mkdir tc && tar -xzf tc.tgz -C tc
           sudo apt-get install -y clang lld > /dev/null
-          sed -i '83s/defined(__APPLE__)/defined(__APPLE__) || defined(__FreeBSD__)/' swan/src/core/cpu_recompiler_types.h
+          sed -i '86s/.*/#define ABI_SYSV 1/' swan/src/core/cpu_recompiler_types.h
           sed -i 's/std::clamp(/std::clamp<float>(/g' swan/src/core/analog_controller.cpp swan/src/core/analog_joystick.cpp swan/src/core/negcon.cpp swan/src/core/negcon_rumble.cpp
           printf '#define HAVE_MKSTEMP 1\n#define HAVE_ALLOCA_H 1\n' > swan/src/config.h
       - name: Buscar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
-          echo MACROS; echo | clang++ --target=x86_64-pc-freebsd12-elf -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -dM -E -x c++ - | grep -i "freebsd\|__ELF__\|__unix__\|__x86_64__" | head -10
-          echo CABECERA; sed -n '81,86p' swan/src/core/cpu_recompiler_types.h | cut -c1-120
+          INC=$(find swan/dep -type d -name include | sed 's/^/-I /' | tr '\n' ' ')
+          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW"
+          echo LINEA83; sed -n '83p' swan/src/core/cpu_recompiler_types.h | cut -c100-300
+          echo FREEBSD; clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I swan/src $INC $X -dD -E swan/src/common/memory_arena.cpp 2>/dev/null | grep -n "__FreeBSD__" | head -8
       - name: Probar todo
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
