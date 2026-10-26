@@ -22,3 +22,12 @@ jobs:
           find tc -name link.x
           find tc -maxdepth 3 -type d -name include
           echo CMAKE_LIBS; grep -n "find_package\|CXX_STANDARD" swan/CMakeLists.txt | head -30
+      - name: Probar compilar
+        run: |
+          sudo apt-get install -y clang lld > /dev/null
+          OO=$PWD/tc/OpenOrbis/PS4Toolchain
+          clang++ --version | head -1
+          for f in bios cpu_core cdrom; do
+          echo ARCHIVO_$f
+          clang++ --target=x86_64-pc-freebsd12-elf -std=c++17 -fsyntax-only -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I swan/src -I swan/dep/libretro-common/include swan/src/core/$f.cpp 2>&1 | head -8
+          done
