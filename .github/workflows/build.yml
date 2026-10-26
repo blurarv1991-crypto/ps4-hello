@@ -69,7 +69,9 @@ jobs:
           mkdir -p sce_module
           for f in libc.prx libSceFios2.prx; do P=$(find "$OO_PS4_TOOLCHAIN" ../.. -name $f | head -1); echo "$f: $P"; cp "$P" sce_module/$f; done
           grep -n "icon0.png" Makefile
-          sed -i 's|sce_sys/icon0.png|sce_sys/icon0.png sce_module/libc.prx sce_module/libSceFios2.prx"|' Makefile
+          sed -i -E 's#sce_sys/icon0\.png("?)#sce_sys/icon0.png sce_module/libc.prx sce_module/libSceFios2.prx\1#' Makefile
+          echo "MAKEFILE DESPUES:"
+          grep -n "icon0.png" Makefile
           make
 
       - name: Reunir el pkg
