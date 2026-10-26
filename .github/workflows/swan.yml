@@ -42,10 +42,16 @@ jobs:
           echo OBJETOS_DEP; ls obj | grep -c "^dep_"
       - name: Faltan
         run: |
+          OO=$PWD/tc/OpenOrbis/PS4Toolchain
           cd obj
           nm -g --undefined-only --no-demangle *.o 2>/dev/null | grep -v ":$" | awk 'NF==2{print $2}' | sort -u > u.txt
           nm -g --defined-only --no-demangle *.o 2>/dev/null | awk 'NF==3{print $3}' | sort -u > d.txt
           comm -23 u.txt d.txt > falta.txt
+          for l in $OO/lib/*; do nm -D --defined-only "$l" 2>/dev/null; nm -g --defined-only "$l" 2>/dev/null; done | awk '{print $NF}' | sort -u > lib.txt
           echo TOTAL_FALTAN; wc -l < falta.txt
-          echo FUNCIONES_C; grep -v "^_Z" falta.txt | head -45
-          echo FUNCIONES_CPP; grep "^_Z" falta.txt | grep -v "^_ZNSt\|^_ZSt\|^_ZNKSt\|^_Znw\|^_Zna\|^_Zd" | cut -c1-100 | head -15
+          echo SIMBOLOS_EN_LIBS; wc -l < lib.txt
+          comm -23 falta.txt lib.txt > real.txt
+          echo SIN_RESOLVER; wc -l < real.txt
+          echo HOSTINTERFACE; grep -c "HostInterface" real.txt
+          echo GL_VK; grep -c "^GLAD_\|^gl\|^vk" real.txt
+          echo OTROS; grep -v "HostInterface\|^GLAD_\|^gl\|^vk" real.txt | cut -c1-70 | head -60 | tr '\n' ' ' | fold -w 90
