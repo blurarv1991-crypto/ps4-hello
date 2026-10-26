@@ -19,7 +19,7 @@ jobs:
 
       - name: Descargar toolchain
         run: |
-          curl -s https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/$OO_VERSION | grep browser_download_url | cut -d '"' -f 4 > assets.txt
+          curl -s -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/$OO_VERSION | grep browser_download_url | cut -d '"' -f 4 > assets.txt
           echo "Archivos de la Release:"
           cat assets.txt
           URL=$(grep -i linux assets.txt | head -1)
@@ -67,9 +67,9 @@ jobs:
           if [ -z "$R" ]; then echo "No hay right.sprx"; find "$OO_PS4_TOOLCHAIN" -maxdepth 3 -type d | head -40; exit 1; fi
           cp "$R" sce_sys/about/right.sprx
           mkdir -p sce_module
-          for f in libc.prx libSceFios2.prx; do P=$(find "$OO_PS4_TOOLCHAIN" ../.. -name $f | head -1); echo "$f: $P"; if [ -n "$P" ]; then cp "$P" sce_module/$f; fi; done
+          for f in libc.prx libSceFios2.prx; do P=$(find "$OO_PS4_TOOLCHAIN" ../.. -name $f | head -1); echo "$f: $P"; cp "$P" sce_module/$f; done
           grep -n "icon0.png" Makefile
-          sed -i 's|sce_sys/icon0.png"|sce_sys/icon0.png sce_module/libc.prx sce_module/libSceFios2.prx"|' Makefile
+          sed -i 's|sce_sys/icon0.png|sce_sys/icon0.png sce_module/libc.prx sce_module/libSceFios2.prx"|' Makefile
           make
 
       - name: Reunir el pkg
