@@ -92,3 +92,8 @@ jobs:
           echo MAIN; nm p3.elf 2>/dev/null | grep -c " T main" || true
           echo QUEDAN; head -12 s2.txt | cut -c1-90
           echo PRIMERAS; head -3 l2.txt | cut -c1-150
+      - name: Guardar elf
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3elf
+          path: p3.elf
