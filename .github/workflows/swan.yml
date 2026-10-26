@@ -50,7 +50,6 @@ jobs:
           X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1"
           A=$(find swan/dep/libretro-common -name "*.c" \( -path "*/streams/*" -o -path "*/file/*" -o -path "*/vfs/*" -o -path "*/compat/*" -o -path "*/string/*" -o -path "*/encodings/*" -o -path "*/time/*" -o -path "*/rthreads/*" -o -path "*/memmap/*" \))
           B=$(grep -rl "retro_spsc_init\|data_transfer_open_prefix" swan/dep/libretro-common --include=*.c || true)
-          echo DEFINEN_SPSC_Y_DATA; echo $B
           for f in $(echo $A $B swan/dep/stb/src/stb_image.c | tr ' ' '\n' | sort -u); do
           O=obj/lrc_$(echo $f | tr / _).o
           if ! clang --target=x86_64-pc-freebsd12-elf -std=gnu11 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include -I swan/dep/stub $INC $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 "error:" e.txt | sed 's/.*error: //' | cut -c1-110 || true; fi
@@ -64,10 +63,21 @@ jobs:
       - name: Enlazar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
-          ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 --allow-multiple-definition -L$OO/lib $OO/lib/crt1.o obj/*.o -lc -lkernel -lc++ -o prueba.elf > link.txt 2>&1 || true
-          grep "undefined symbol" link.txt | sed 's/.*undefined symbol: //' | sort -u > sym.txt || true
-          c++filt < sym.txt | sort -u > dem.txt || true
-          echo SIN_DEFINIR; wc -l < dem.txt
-          echo API_RETRO; nm -g --defined-only obj/*.o 2>/dev/null | awk '{print $3}' | grep "^retro_" | tr '\n' ' ' | fold -w 90
-          echo FICHEROS_QUE_PIDEN; grep "referenced by" link.txt | sed 's/.*referenced by //' | sort | uniq -c | sort -rn | head -22 | awk '{print $2" "$1}' | tr '\n' ' ' | fold -w 90
-          echo OTROS; grep -v "GLAD\|^vk\|^ds_vk\|Vulkan\|GL::" dem.txt | cut -c1-60 | head -50 | tr '\n' ' ' | fold -w 90
+          mkdir obj2
+          cp obj/*.o obj2/
+          rm -f obj2/*gpu_hw_vulkan* obj2/*gpu_hw_opengl*
+          L="ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 --allow-multiple-definition -L$OO/lib $OO/lib/crt1.o"
+          $L obj2/*.o -lc -lkernel -lc++ -o p1.elf > l1.txt 2>&1 || true
+          grep "undefined symbol" l1.txt | sed 's/.*undefined symbol: //' | sort -u > s1.txt || true
+          echo SIN_DEFINIR_1; wc -l < s1.txt
+          grep "^GLAD_GL_" s1.txt | sed 's/.*/int &;/' > stub.c || true
+          echo 'int main(void) { return 0; }' >> stub.c
+          clang --target=x86_64-pc-freebsd12-elf -fPIC -c -w -isysroot $OO -isystem $OO/include stub.c -o obj2/stub.o
+          $L obj2/*.o -lc -lkernel -lc++ -o p2.elf > l2.txt 2>&1 || true
+          grep "undefined symbol" l2.txt | sed 's/.*undefined symbol: //' | sort -u > s2.txt || true
+          c++filt < s2.txt | sort -u > d2.txt || true
+          echo SIN_DEFINIR_2; wc -l < d2.txt
+          echo PRIMERAS; head -4 l2.txt | cut -c1-150
+          echo ELF; ls -la p2.elf 2>&1 | cut -c1-80
+          echo FALTAN; cut -c1-70 d2.txt | head -50 | tr '\n' ' ' | fold -w 90
+          echo PIDEN; grep "referenced by" l2.txt | sed 's/.*referenced by //' | sort | uniq -c | sort -rn | head -12 | awk '{print $2" "$1}' | tr '\n' ' ' | fold -w 90
