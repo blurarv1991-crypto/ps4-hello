@@ -1,0 +1,15 @@
+name: Ver Makefile
+
+on:
+  push:
+    paths:
+      - '.github/workflows/mk.yml'
+
+jobs:
+  ver:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Mostrar
+        run: |
+          git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
+          cat -n src/samples/SDL2/Makefile
