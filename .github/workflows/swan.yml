@@ -43,12 +43,11 @@ jobs:
       - name: Enlazar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
-          echo LIBS; ls $OO/lib | head -40 | tr '\n' ' '
-          echo; echo CRT; ls $OO/lib/crt1.o
+          echo LIBS; ls $OO/lib | grep -i "^lib\|crt" | tr '\n' ' '
+          echo
           ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 -L$OO/lib $OO/lib/crt1.o obj/*.o -lc -lkernel -lc++ -o prueba.elf > link.txt 2>&1 || true
-          grep "undefined symbol" link.txt | sed 's/.*undefined symbol: //' | sort -u > sym.txt
-          c++filt < sym.txt | sort -u > dem.txt
+          echo PRIMERAS_LINEAS; head -8 link.txt | cut -c1-150
+          grep "undefined symbol" link.txt | sed 's/.*undefined symbol: //' | sort -u > sym.txt || true
+          c++filt < sym.txt | sort -u > dem.txt || true
           echo SIN_DEFINIR; wc -l < dem.txt
-          echo GL_VK_HOST_LIBRETRO; grep -c "GL\|Vulkan\|HostInterface\|Libretro" dem.txt
-          echo OTROS; grep -v "GL\|Vulkan\|HostInterface\|Libretro" dem.txt | cut -c1-80 | head -40
-          echo OTRO_ERROR; grep -v "undefined symbol\|referenced by\|^>>>" link.txt | cut -c1-120 | head -6
+          echo OTROS; grep -v "GL\|Vulkan\|HostInterface\|Libretro" dem.txt | cut -c1-80 | head -40 || true
