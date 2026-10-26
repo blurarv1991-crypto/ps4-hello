@@ -9,28 +9,16 @@ jobs:
   ver:
     runs-on: ubuntu-24.04
     steps:
-      - name: Mirar codigo
+      - name: Preparar
         run: |
           git clone --depth 1 https://github.com/libretro/swanstation.git swan
-          echo CARPETAS; ls swan
-          echo DEP; ls swan/dep
-          echo CORE_ARCHIVOS; ls swan/src/core | wc -l
-      - name: Toolchain
-        run: |
           curl -sL -o tc.tgz https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz
           mkdir tc && tar -xzf tc.tgz -C tc
-          find tc -name link.x
-          find tc -maxdepth 3 -type d -name include
-          echo CMAKE_LIBS; grep -n "find_package\|CXX_STANDARD" swan/CMakeLists.txt | head -30
-      - name: Probar compilar
-        run: |
           sudo apt-get install -y clang lld > /dev/null
-          OO=$PWD/tc/OpenOrbis/PS4Toolchain
-          clang++ --version | head -1
-          for f in bios cpu_core cdrom; do
-          echo ARCHIVO_$f
-          clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -fsyntax-only -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I swan/src -I swan/dep/libretro-common/include swan/src/core/$f.cpp 2>&1 | head -12
-          done
+      - name: Buscar
+        run: |
+          find swan \( -name xbyak.h -o -name miniz.h -o -name config.h -o -name "openbios*" \) | head -10
+          grep -rn "RETRO_ATOMIC_FORCE" swan | head -10
       - name: Probar todo
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
