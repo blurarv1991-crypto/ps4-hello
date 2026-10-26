@@ -9,13 +9,14 @@ jobs:
   ver:
     runs-on: ubuntu-24.04
     steps:
-      - name: Consultar paquetes
+      - name: Mirar imagen Docker
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq pacman-package-manager makepkg libarchive-tools
-          printf '\n[pacbrew]\nSigLevel = Optional TrustAll\nServer = http://pacbrew.mydedibox.fr/packages/\n' | sudo tee -a /etc/pacman.conf
-          sudo pacman -Sy
-          echo "BUSCANDO FFMPEG:"
-          pacman -Ss ffmpeg || true
-          echo "PAQUETES PS4:"
-          pacman -Sl pacbrew | grep -i ps4 | head -80 || true
+          docker pull xfangfang/pacbrew:231021
+          docker run --rm xfangfang/pacbrew:231021 sh -c '
+            echo "CARPETA PS4:"
+            ls /opt/pacbrew/ps4/openorbis
+            echo "BUSCANDO FFMPEG:"
+            find /opt/pacbrew -iname "*avcodec*" -o -iname "*ffmpeg*" | head -20
+            echo "LIBRERIAS PS4:"
+            ls /opt/pacbrew/ps4/openorbis/portlibs/usr/lib 2>/dev/null | head -80
+          '
