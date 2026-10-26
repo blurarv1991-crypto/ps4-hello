@@ -40,18 +40,15 @@ jobs:
           if ! clang --target=x86_64-pc-freebsd12-elf -std=gnu11 -O1 -c -w -isysroot $OO -isystem $OO/include $INC -I swan/dep/libchdr/deps/miniz-3.1.1 $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 "error:" e.txt | sed 's/.*error: //' | cut -c1-110; fi
           done
           echo OBJETOS_DEP; ls obj | grep -c "^dep_"
-      - name: Faltan
+      - name: Enlazar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
-          cd obj
-          nm -g --undefined-only --no-demangle *.o 2>/dev/null | grep -v ":$" | awk 'NF==2{print $2}' | sort -u > u.txt
-          nm -g --defined-only --no-demangle *.o 2>/dev/null | awk 'NF==3{print $3}' | sort -u > d.txt
-          comm -23 u.txt d.txt > falta.txt
-          for l in $OO/lib/*; do nm -D --defined-only "$l" 2>/dev/null; nm -g --defined-only "$l" 2>/dev/null; done | awk '{print $NF}' | sort -u > lib.txt
-          echo TOTAL_FALTAN; wc -l < falta.txt
-          echo SIMBOLOS_EN_LIBS; wc -l < lib.txt
-          comm -23 falta.txt lib.txt > real.txt
-          echo SIN_RESOLVER; wc -l < real.txt
-          echo HOSTINTERFACE; grep -c "HostInterface" real.txt
-          echo GL_VK; grep -c "^GLAD_\|^gl\|^vk" real.txt
-          echo OTROS; grep -v "HostInterface\|^GLAD_\|^gl\|^vk" real.txt | cut -c1-70 | head -60 | tr '\n' ' ' | fold -w 90
+          echo LIBS; ls $OO/lib | head -40 | tr '\n' ' '
+          echo; echo CRT; ls $OO/lib/crt1.o
+          ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 -L$OO/lib $OO/lib/crt1.o obj/*.o -lc -lkernel -lc++ -o prueba.elf > link.txt 2>&1 || true
+          grep "undefined symbol" link.txt | sed 's/.*undefined symbol: //' | sort -u > sym.txt
+          c++filt < sym.txt | sort -u > dem.txt
+          echo SIN_DEFINIR; wc -l < dem.txt
+          echo GL_VK_HOST_LIBRETRO; grep -c "GL\|Vulkan\|HostInterface\|Libretro" dem.txt
+          echo OTROS; grep -v "GL\|Vulkan\|HostInterface\|Libretro" dem.txt | cut -c1-80 | head -40
+          echo OTRO_ERROR; grep -v "undefined symbol\|referenced by\|^>>>" link.txt | cut -c1-120 | head -6
