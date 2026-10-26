@@ -12,4 +12,4 @@ jobs:
       - name: Mirar imagen Docker
         run: |
           docker pull xfangfang/pacbrew:231021
-          docker run --rm --entrypoint /bin/bash xfangfang/pacbrew:231021 -c 'echo CARPETA_PS4; ls /opt/pacbrew/ps4/openorbis; echo BUSCANDO_FFMPEG; find /opt/pacbrew -iname "*avcodec*" -o -iname "*ffmpeg*" | head -20; echo LIBRERIAS_PS4; ls /opt/pacbrew/ps4/openorbis/portlibs/usr/lib | head -80'
+          docker run --rm --entrypoint /bin/bash xfangfang/pacbrew:231021 -c 'P=/opt/pacbrew/ps4/openorbis; echo USR_LIB; ls $P/usr/lib | head -80; echo USR_INCLUDE; ls $P/usr/include | head -60; echo BUSCANDO_SDL; find /opt/pacbrew -iname "*SDL2*" | head -15'
