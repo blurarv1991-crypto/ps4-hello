@@ -20,7 +20,7 @@ jobs:
           sed -i 's/std::clamp(/std::clamp<float>(/g' swan/src/core/analog_controller.cpp swan/src/core/analog_joystick.cpp swan/src/core/negcon.cpp swan/src/core/negcon_rumble.cpp
           printf '#define HAVE_MKSTEMP 1\n#define HAVE_ALLOCA_H 1\n' > swan/src/config.h
           mkdir -p swan/dep/stub
-          : > swan/dep/stub/pthread_np.h
+          printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
       - name: Compilar
         run: |
@@ -48,11 +48,10 @@ jobs:
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
           INC=$(find swan/dep -type d -name include | sed 's/^/-I /' | tr '\n' ' ')
           X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1"
-          echo VERSION; head -8 swan/src/libretro/version.h
-          echo STB; ls swan/dep/stb | tr '\n' ' '
-          grep -rl STB_IMAGE_IMPLEMENTATION swan | head -3 || true
-          echo RETRO_API; grep -c "retro_run\|retro_init" swan/src/libretro/*.cpp || true
-          for f in $(find swan/dep/libretro-common -name "*.c" \( -path "*/streams/*" -o -path "*/file/*" -o -path "*/vfs/*" -o -path "*/compat/*" -o -path "*/string/*" -o -path "*/encodings/*" -o -path "*/time/*" -o -path "*/rthreads/*" -o -path "*/memmap/*" \)); do
+          A=$(find swan/dep/libretro-common -name "*.c" \( -path "*/streams/*" -o -path "*/file/*" -o -path "*/vfs/*" -o -path "*/compat/*" -o -path "*/string/*" -o -path "*/encodings/*" -o -path "*/time/*" -o -path "*/rthreads/*" -o -path "*/memmap/*" \))
+          B=$(grep -rl "retro_spsc_init\|data_transfer_open_prefix" swan/dep/libretro-common --include=*.c || true)
+          echo DEFINEN_SPSC_Y_DATA; echo $B
+          for f in $(echo $A $B swan/dep/stb/src/stb_image.c | tr ' ' '\n' | sort -u); do
           O=obj/lrc_$(echo $f | tr / _).o
           if ! clang --target=x86_64-pc-freebsd12-elf -std=gnu11 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include -I swan/dep/stub $INC $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 "error:" e.txt | sed 's/.*error: //' | cut -c1-110 || true; fi
           done
@@ -66,8 +65,9 @@ jobs:
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
           ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 --allow-multiple-definition -L$OO/lib $OO/lib/crt1.o obj/*.o -lc -lkernel -lc++ -o prueba.elf > link.txt 2>&1 || true
-          echo PRIMERAS_LINEAS; head -4 link.txt | cut -c1-150
           grep "undefined symbol" link.txt | sed 's/.*undefined symbol: //' | sort -u > sym.txt || true
           c++filt < sym.txt | sort -u > dem.txt || true
           echo SIN_DEFINIR; wc -l < dem.txt
-          echo OTROS; grep -v "GL\|Vulkan\|vk\|glad\|^ds_" dem.txt | cut -c1-60 | head -70 | tr '\n' ' ' | fold -w 90
+          echo API_RETRO; nm -g --defined-only obj/*.o 2>/dev/null | awk '{print $3}' | grep "^retro_" | tr '\n' ' ' | fold -w 90
+          echo FICHEROS_QUE_PIDEN; grep "referenced by" link.txt | sed 's/.*referenced by //' | sort | uniq -c | sort -rn | head -22 | awk '{print $2" "$1}' | tr '\n' ' ' | fold -w 90
+          echo OTROS; grep -v "GLAD\|^vk\|^ds_vk\|Vulkan\|GL::" dem.txt | cut -c1-60 | head -50 | tr '\n' ' ' | fold -w 90
