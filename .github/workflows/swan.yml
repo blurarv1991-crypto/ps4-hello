@@ -31,3 +31,21 @@ jobs:
           if ! clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -O1 -c -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I swan/src $INC $X $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 -A2 "error:" e.txt | sed 's/.*error: //' | cut -c1-120; fi
           done
           echo OBJETOS; ls obj | wc -l
+      - name: Dependencias
+        run: |
+          OO=$PWD/tc/OpenOrbis/PS4Toolchain
+          INC=$(find swan/dep -type d -name include | sed 's/^/-I /' | tr '\n' ' ')
+          for f in $(find swan/dep/xxhash swan/dep/libchdr -name "*.c" -not -path "*test*" -not -path "*example*" -not -path "*cmake*"); do
+          O=obj/dep_$(echo $f | tr / _).o
+          if ! clang --target=x86_64-pc-freebsd12-elf -std=gnu11 -O1 -c -w -isysroot $OO -isystem $OO/include $INC -I swan/dep/libchdr/deps/miniz-3.1.1 $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 "error:" e.txt | sed 's/.*error: //' | cut -c1-110; fi
+          done
+          echo OBJETOS_DEP; ls obj | grep -c "^dep_"
+      - name: Faltan
+        run: |
+          cd obj
+          nm -g --undefined-only --no-demangle *.o 2>/dev/null | grep -v ":$" | awk 'NF==2{print $2}' | sort -u > u.txt
+          nm -g --defined-only --no-demangle *.o 2>/dev/null | awk 'NF==3{print $3}' | sort -u > d.txt
+          comm -23 u.txt d.txt > falta.txt
+          echo TOTAL_FALTAN; wc -l < falta.txt
+          echo FUNCIONES_C; grep -v "^_Z" falta.txt | head -45
+          echo FUNCIONES_CPP; grep "^_Z" falta.txt | grep -v "^_ZNSt\|^_ZSt\|^_ZNKSt\|^_Znw\|^_Zna\|^_Zd" | cut -c1-100 | head -15
