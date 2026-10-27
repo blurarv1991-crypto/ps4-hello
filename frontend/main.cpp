@@ -255,7 +255,11 @@ static bool entorno(unsigned cmd, void *data) {
       }
       if (contiene(v->key, "GPU_UseThread")) {
         v->value = "false";
-        if (!g_traza) esp("  -> respondido false (sin hilo GPU)");
+        return true;
+      }
+      if (contiene(v->key, "Logging_LogLevel")) {
+        v->value = "Debug";
+        if (!g_traza) esp("  -> respondido Debug");
         return true;
       }
       if (g_interp && contiene(v->key, "executionmode")) {
