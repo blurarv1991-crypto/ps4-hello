@@ -110,12 +110,20 @@ static unsigned g_vw = 0, g_vh = 0;
 static int g_vc = 0, g_vnz = 0;
 static int g_pf = -1;
 static int g_frames = 0;
-static int g_run_ms = 0, g_dib_ms = 0;
 static volatile int g_traza = 0;
 static volatile int g_dentro = 0;
 static int g_fd = -1;
 static int g_interp = 0;
 static int g_jugando = 0;
+
+/* tiempos en microsegundos (acumulados) y medias en decimas de ms */
+static double a_run = 0, a_upd = 0, a_cop = 0, a_pre = 0;
+static int n_upd = 0, n_dib = 0;
+static int m_run = 0, m_upd = 0, m_cop = 0, m_pre = 0;
+
+static double ahora_us(void) {
+  return (double)SDL_GetPerformanceCounter() * 1000000.0 / (double)SDL_GetPerformanceFrequency();
+}
 
 static void dibujar(void);
 
@@ -302,7 +310,12 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
     g_th = (int)h;
     esp("TEXTURA %dx%d fmt=%d ptr=%p", g_tw, g_th, g_pf, (void *)g_tex);
   }
-  if (g_tex) SDL_UpdateTexture(g_tex, NULL, d, (int)p);
+  if (g_tex) {
+    double t0 = ahora_us();
+    SDL_UpdateTexture(g_tex, NULL, d, (int)p);
+    a_upd += ahora_us() - t0;
+    n_upd++;
+  }
 }
 static void audio1(int16_t l, int16_t r) { (void)l; (void)r; }
 static size_t audio2(const int16_t *d, size_t n) { (void)d; return n; }
@@ -349,20 +362,28 @@ static void dibujar(void) {
   SDL_RenderPresent(R);
 }
 
-/* Pantalla de juego: imagen del nucleo a 4:3 y una linea de texto */
+/* Pantalla de juego: imagen a tamano original, centrada, con tiempos */
 static void dibujar_juego(void) {
+  double t0 = ahora_us();
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
   SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
   if (g_tex) {
-    SDL_Rect dst = {240, 0, 1440, 1080};
+    SDL_Rect dst = {(1920 - g_tw) / 2, (1080 - g_th) / 2, g_tw, g_th};
     SDL_RenderCopy(R, g_tex, NULL, &dst);
   }
+  double t1 = ahora_us();
   SDL_RenderSetScale(R, 2, 2);
-  char t[160];
-  snprintf(t, sizeof(t), "F:%d run:%d dib:%d ms  %ux%u", g_frames, g_run_ms, g_dib_ms, g_vw, g_vh);
+  char t[200];
+  snprintf(t, sizeof(t), "F:%d run:%d.%d upd:%d.%d cop:%d.%d pre:%d.%d ms  %ux%u", g_frames,
+           m_run / 10, m_run % 10, m_upd / 10, m_upd % 10, m_cop / 10, m_cop % 10, m_pre / 10, m_pre % 10, g_vw, g_vh);
   texto(5, 5, t);
+  double t2 = ahora_us();
   SDL_RenderPresent(R);
+  double t3 = ahora_us();
+  a_cop += t1 - t0;
+  a_pre += t3 - t2;
+  n_dib++;
 }
 
 static void esperar(int frames) {
@@ -451,27 +472,25 @@ int main(void) {
   paso("4) load_game OK; mostrando imagen...");
   esp("INICIO frames (sin limite)");
   g_jugando = 1;
-  unsigned acc_run = 0, acc_dib = 0;
   int i = 0;
   for (;;) {
-    unsigned a = SDL_GetTicks();
+    double a = ahora_us();
     retro_run();
-    unsigned b = SDL_GetTicks();
+    a_run += ahora_us() - a;
     i++;
     g_frames = i;
-    if (i % 2 == 0) {
+    if (i % 3 == 0) {
       SDL_PumpEvents();
       dibujar_juego();
     }
-    unsigned c = SDL_GetTicks();
-    acc_run += b - a;
-    acc_dib += c - b;
     if (i % 60 == 0) {
-      g_run_ms = (int)(acc_run / 60);
-      g_dib_ms = (int)(acc_dib / 60);
-      esp("frame %d run=%d dib=%d", i, g_run_ms, g_dib_ms);
-      acc_run = 0;
-      acc_dib = 0;
+      m_run = (int)(a_run / 60.0 / 100.0);
+      m_upd = n_upd ? (int)(a_upd / n_upd / 100.0) : 0;
+      m_cop = n_dib ? (int)(a_cop / n_dib / 100.0) : 0;
+      m_pre = n_dib ? (int)(a_pre / n_dib / 100.0) : 0;
+      esp("frame %d run=%d upd=%d cop=%d pre=%d (decimas de ms)", i, m_run, m_upd, m_cop, m_pre);
+      a_run = a_upd = a_cop = a_pre = 0;
+      n_upd = n_dib = 0;
     }
   }
   return 0;
