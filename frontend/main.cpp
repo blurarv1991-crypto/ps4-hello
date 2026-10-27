@@ -6,6 +6,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -109,10 +110,11 @@ static int g_frames = 0, g_ms = 0;
 static volatile int g_traza = 0;
 static volatile int g_dentro = 0;
 static int g_fd = -1;
+static int g_interp = 0;
 
 static void dibujar(void);
 
-/* Escribe una linea en espia.txt sin dibujar y sin pedir memoria */
+/* Escribe una linea en espia.txt sin dibujar */
 static void esp(const char *fmt, ...) {
   if (g_fd < 0) return;
   char b[300];
@@ -127,6 +129,12 @@ static void esp(const char *fmt, ...) {
   fsync(g_fd);
 }
 
+static void al_fallo(int sig, siginfo_t *si, void *ctx) {
+  (void)ctx;
+  esp("FALLO senal=%d addr=%p", sig, si ? si->si_addr : (void *)0);
+  _exit(1);
+}
+
 static void log_core(int nivel, const char *fmt, ...) {
   (void)nivel;
   char tmp[200];
@@ -137,10 +145,8 @@ static void log_core(int nivel, const char *fmt, ...) {
   for (char *p = tmp; *p; p++) {
     if (*p == '\n' || *p == '\r') *p = ' ';
   }
-  if (g_traza) {
-    esp("LOG: %s", tmp);
-    return;
-  }
+  esp("LOG: %s", tmp);
+  if (g_traza) return;
   char *d = logbuf[nlog % 16];
   snprintf(d, sizeof(logbuf[0]), "%s", tmp);
   nlog++;
@@ -190,21 +196,21 @@ void *__wrap_mmap(void *a, size_t l, int pr, int fl, int fd, off_t o) {
 }
 
 int __wrap_munmap(void *a, size_t l) {
-  TRAZA("T> munmap len=%llu", (unsigned long long)l);
+  TRAZA("T> munmap addr=%p len=%llu", a, (unsigned long long)l);
   int r = __real_munmap(a, l);
   TRAZA("T< munmap = %d", r);
   return r;
 }
 
 int __wrap_mprotect(void *a, size_t l, int pr) {
-  TRAZA("T> mprotect len=%llu pr=%d", (unsigned long long)l, pr);
+  TRAZA("T> mprotect addr=%p len=%llu pr=%d", a, (unsigned long long)l, pr);
   int r = __real_mprotect(a, l, pr);
   TRAZA("T< mprotect = %d", r);
   return r;
 }
 
 int __wrap_madvise(void *a, size_t l, int b) {
-  TRAZA("T> madvise len=%llu adv=%d", (unsigned long long)l, b);
+  TRAZA("T> madvise addr=%p len=%llu adv=%d", a, (unsigned long long)l, b);
   int r = __real_madvise(a, l, b);
   TRAZA("T< madvise = %d", r);
   return r;
@@ -234,9 +240,14 @@ static bool entorno(unsigned cmd, void *data) {
     case 11: return true;
     case 15: {
       retro_variable *v = (retro_variable *)data;
-      if (g_traza) esp("ENV15 clave=%s", v->key ? v->key : "(null)");
+      esp("ENV15 clave=%s", v->key ? v->key : "(null)");
       if (contiene(v->key, "fastmem")) {
         v->value = "Disabled";
+        return true;
+      }
+      if (g_interp && contiene(v->key, "executionmode")) {
+        v->value = "Interpreter";
+        esp("  -> respondido Interpreter");
         return true;
       }
       v->value = NULL;
@@ -335,11 +346,27 @@ int main(void) {
   g_main = SDL_ThreadID();
   mkdir("/data/swan", 0777);
 
+  g_interp = existe("/data/swan/interp.txt") ? 1 : 0;
+  g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  esp("ARRANQUE interp=%d", g_interp);
+
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_sigaction = al_fallo;
+  sa.sa_flags = SA_SIGINFO;
+  sigemptyset(&sa.sa_mask);
+  int s1 = sigaction(SIGSEGV, &sa, NULL);
+  int s2 = sigaction(SIGILL, &sa, NULL);
+  int s3 = sigaction(SIGBUS, &sa, NULL);
+  esp("sigaction SEGV=%d ILL=%d BUS=%d", s1, s2, s3);
+
   struct retro_system_info info;
   memset(&info, 0, sizeof(info));
   retro_get_system_info(&info);
   char t[160];
   snprintf(t, sizeof(t), "%s %s API %u", info.library_name ? info.library_name : "?", info.library_version ? info.library_version : "?", retro_api_version());
+  paso(t);
+  snprintf(t, sizeof(t), "fd=%d interp=%d sig=%d,%d,%d", g_fd, g_interp, s1, s2, s3);
   paso(t);
 
   retro_set_environment(entorno);
@@ -366,9 +393,7 @@ int main(void) {
   snprintf(t, sizeof(t), "Juego: %s", ruta);
   paso(t);
 
-  g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  snprintf(t, sizeof(t), "3) load_game: espia.txt fd=%d (pantalla quieta)", g_fd);
-  paso(t);
+  paso("3) load_game (pantalla quieta)...");
   struct retro_game_info gi;
   memset(&gi, 0, sizeof(gi));
   gi.path = ruta;
@@ -384,11 +409,13 @@ int main(void) {
     return 0;
   }
   paso("4) load_game OK; ejecutando 600 frames...");
+  esp("INICIO frames");
   unsigned t0 = SDL_GetTicks();
   for (int i = 0; i < 600; i++) {
     retro_run();
     g_frames = i + 1;
     g_ms = (int)((SDL_GetTicks() - t0) / (unsigned)(i + 1));
+    if (i < 3) esp("frame %d OK", i + 1);
     dibujar();
   }
   paso("5) 600 frames terminados");
