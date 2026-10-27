@@ -352,7 +352,8 @@ int main(void) {
 
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
-  sa.sa_sigaction = al_fallo;
+  /* Suposicion: el puntero a la funcion es el primer campo de sigaction */
+  *(void **)&sa = (void *)al_fallo;
   sa.sa_flags = SA_SIGINFO;
   sigemptyset(&sa.sa_mask);
   int s1 = sigaction(SIGSEGV, &sa, NULL);
