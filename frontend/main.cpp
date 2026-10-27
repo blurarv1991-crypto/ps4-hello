@@ -10,11 +10,33 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+extern "C" {
+#include <orbis/UserService.h>
+#include <orbis/Pad.h>
+}
 #include "stb_easy_font.h"
 
 #ifndef SHM_ANON
 #define SHM_ANON ((char *)1)
 #endif
+
+/* Mascaras de botones de ScePad (suposicion: valores del SDK) */
+#define PB_L3 0x00000002u
+#define PB_R3 0x00000004u
+#define PB_OPTIONS 0x00000008u
+#define PB_UP 0x00000010u
+#define PB_RIGHT 0x00000020u
+#define PB_DOWN 0x00000040u
+#define PB_LEFT 0x00000080u
+#define PB_L2 0x00000100u
+#define PB_R2 0x00000200u
+#define PB_L1 0x00000400u
+#define PB_R1 0x00000800u
+#define PB_TRIANGLE 0x00001000u
+#define PB_CIRCLE 0x00002000u
+#define PB_CROSS 0x00004000u
+#define PB_SQUARE 0x00008000u
+#define PB_TOUCH 0x00100000u
 
 static long long tam_ruta(const char *p) {
   FILE *f = fopen(p, "rb");
@@ -115,6 +137,14 @@ static volatile int g_dentro = 0;
 static int g_fd = -1;
 static int g_interp = 0;
 static int g_jugando = 0;
+
+/* mando */
+static int g_pad = -1;
+static unsigned g_mask = 0;
+static uint32_t g_btn = 0;
+static uint32_t g_btn_prev = 0;
+static int g_modo = 1;
+static int g_cada = 3;
 
 /* tiempos en microsegundos (acumulados) y medias en decimas de ms */
 static double a_run = 0, a_upd = 0, a_cop = 0, a_pre = 0;
@@ -319,8 +349,50 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
 }
 static void audio1(int16_t l, int16_t r) { (void)l; (void)r; }
 static size_t audio2(const int16_t *d, size_t n) { (void)d; return n; }
-static void poll(void) {}
-static int16_t entrada(unsigned a, unsigned b, unsigned c, unsigned d) { (void)a; (void)b; (void)c; (void)d; return 0; }
+
+/* Lee el mando y arma la mascara de botones de libretro */
+static void poll(void) {
+  if (g_pad < 0) return;
+  ScePadData d;
+  memset(&d, 0, sizeof(d));
+  if (scePadReadState(g_pad, &d) != 0) return;
+  uint32_t b = d.buttons;
+  unsigned m = 0;
+  if (b & PB_CROSS) m |= 1u << 0;
+  if (b & PB_SQUARE) m |= 1u << 1;
+  if (b & PB_TOUCH) m |= 1u << 2;
+  if (b & PB_OPTIONS) m |= 1u << 3;
+  if (b & PB_UP) m |= 1u << 4;
+  if (b & PB_DOWN) m |= 1u << 5;
+  if (b & PB_LEFT) m |= 1u << 6;
+  if (b & PB_RIGHT) m |= 1u << 7;
+  if (b & PB_CIRCLE) m |= 1u << 8;
+  if (b & PB_TRIANGLE) m |= 1u << 9;
+  if (b & PB_L1) m |= 1u << 10;
+  if (b & PB_R1) m |= 1u << 11;
+  if (b & PB_L2) m |= 1u << 12;
+  if (b & PB_R2) m |= 1u << 13;
+  /* stick izquierdo como cruceta */
+  if (d.leftStick.x < 64) m |= 1u << 6;
+  if (d.leftStick.x > 192) m |= 1u << 7;
+  if (d.leftStick.y < 64) m |= 1u << 4;
+  if (d.leftStick.y > 192) m |= 1u << 5;
+  g_mask = m;
+  g_btn = b;
+  /* L3 cambia el modo de imagen, R3 cambia cada cuantos frames se dibuja */
+  uint32_t nuevos = b & ~g_btn_prev;
+  if (nuevos & PB_L3) g_modo = (g_modo + 1) % 3;
+  if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
+  g_btn_prev = b;
+}
+
+static int16_t entrada(unsigned port, unsigned dev, unsigned idx, unsigned id) {
+  (void)idx;
+  if (port != 0 || dev != 1) return 0;
+  if (id == 256) return (int16_t)(g_mask & 0xFFFF);
+  if (id < 16) return (int16_t)((g_mask >> id) & 1u);
+  return 0;
+}
 
 static bool existe(const char *p) {
   FILE *f = fopen(p, "rb");
@@ -362,21 +434,32 @@ static void dibujar(void) {
   SDL_RenderPresent(R);
 }
 
-/* Pantalla de juego: imagen a tamano original, centrada, con tiempos */
+/* Pantalla de juego: imagen segun el modo, con tiempos */
 static void dibujar_juego(void) {
   double t0 = ahora_us();
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
   SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
-  if (g_tex) {
-    SDL_Rect dst = {(1920 - g_tw) / 2, (1080 - g_th) / 2, g_tw, g_th};
+  if (g_tex && g_tw > 0 && g_th > 0) {
+    int dw = g_tw, dh = g_th;
+    if (g_modo == 1) {
+      int k = 1080 / g_th;
+      if (k < 1) k = 1;
+      dh = g_th * k;
+      dw = dh * 4 / 3;
+      if (dw > 1920) { dw = 1920; dh = dw * 3 / 4; }
+    } else if (g_modo == 2) {
+      dw = 1440;
+      dh = 1080;
+    }
+    SDL_Rect dst = {(1920 - dw) / 2, (1080 - dh) / 2, dw, dh};
     SDL_RenderCopy(R, g_tex, NULL, &dst);
   }
   double t1 = ahora_us();
   SDL_RenderSetScale(R, 2, 2);
   char t[200];
-  snprintf(t, sizeof(t), "F:%d run:%d.%d upd:%d.%d cop:%d.%d pre:%d.%d ms  %ux%u", g_frames,
-           m_run / 10, m_run % 10, m_upd / 10, m_upd % 10, m_cop / 10, m_cop % 10, m_pre / 10, m_pre % 10, g_vw, g_vh);
+  snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d modo:%d cada:%d pad:%x %ux%u", g_frames,
+           m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, g_modo, g_cada, (unsigned)g_btn, g_vw, g_vh);
   texto(5, 5, t);
   double t2 = ahora_us();
   SDL_RenderPresent(R);
@@ -421,13 +504,21 @@ int main(void) {
   int s3 = sigaction(SIGBUS, &sa, NULL);
   esp("sigaction SEGV=%d ILL=%d BUS=%d", s1, s2, s3);
 
+  /* Mando */
+  int ru = sceUserServiceInitialize(NULL);
+  int32_t uid = 0;
+  int rg = sceUserServiceGetInitialUser(&uid);
+  int rp = scePadInit();
+  g_pad = scePadOpen(uid, 0, 0, NULL);
+  esp("PAD userinit=%d getuser=%d uid=%d padinit=%d handle=%d", ru, rg, (int)uid, rp, g_pad);
+
   struct retro_system_info info;
   memset(&info, 0, sizeof(info));
   retro_get_system_info(&info);
   char t[160];
   snprintf(t, sizeof(t), "%s %s API %u", info.library_name ? info.library_name : "?", info.library_version ? info.library_version : "?", retro_api_version());
   paso(t);
-  snprintf(t, sizeof(t), "fd=%d interp=%d sig=%d,%d,%d", g_fd, g_interp, s1, s2, s3);
+  snprintf(t, sizeof(t), "fd=%d interp=%d sig=%d,%d,%d pad=%d", g_fd, g_interp, s1, s2, s3, g_pad);
   paso(t);
 
   retro_set_environment(entorno);
@@ -479,7 +570,7 @@ int main(void) {
     a_run += ahora_us() - a;
     i++;
     g_frames = i;
-    if (i % 3 == 0) {
+    if (i % g_cada == 0) {
       SDL_PumpEvents();
       dibujar_juego();
     }
@@ -488,7 +579,7 @@ int main(void) {
       m_upd = n_upd ? (int)(a_upd / n_upd / 100.0) : 0;
       m_cop = n_dib ? (int)(a_cop / n_dib / 100.0) : 0;
       m_pre = n_dib ? (int)(a_pre / n_dib / 100.0) : 0;
-      esp("frame %d run=%d upd=%d cop=%d pre=%d (decimas de ms)", i, m_run, m_upd, m_cop, m_pre);
+      esp("frame %d run=%d upd=%d cop=%d pre=%d modo=%d cada=%d pad=%x", i, m_run, m_upd, m_cop, m_pre, g_modo, g_cada, (unsigned)g_btn);
       a_run = a_upd = a_cop = a_pre = 0;
       n_upd = n_dib = 0;
     }
