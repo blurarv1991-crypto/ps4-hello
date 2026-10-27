@@ -122,7 +122,9 @@ void retro_run(void);
 
 static SDL_Renderer *R;
 static SDL_Texture *g_tex = NULL;
+static SDL_Texture *g_tex2 = NULL;
 static int g_tw = 0, g_th = 0;
+static int g_t2w = 0, g_t2h = 0;
 static SDL_threadID g_main = 0;
 static char lineas[24][100];
 static int nl = 0;
@@ -139,19 +141,26 @@ static volatile int g_dentro = 0;
 static int g_fd = -1;
 static int g_interp = 0;
 static int g_jugando = 0;
+static char g_rend[40] = "?";
+
+/* ultimo cuadro del nucleo (para el escalado propio) */
+static const void *g_dp = NULL;
+static unsigned g_dw = 0, g_dh = 0;
+static size_t g_dpitch = 0;
+static uint16_t g_sbuf[1920 * 1080];
 
 /* mando */
 static int g_pad = -1;
 static unsigned g_mask = 0;
 static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
-static int g_modo = 1;
+static int g_modo = 3;
 static int g_cada = 3;
 
 /* tiempos en microsegundos (acumulados) y medias en decimas de ms */
-static double a_run = 0, a_upd = 0, a_cop = 0, a_pre = 0;
+static double a_run = 0, a_upd = 0, a_cop = 0, a_pre = 0, a_esc = 0;
 static int n_upd = 0, n_dib = 0;
-static int m_run = 0, m_upd = 0, m_cop = 0, m_pre = 0;
+static int m_run = 0, m_upd = 0, m_cop = 0, m_pre = 0, m_esc = 0;
 
 static double ahora_us(void) {
   return (double)SDL_GetPerformanceCounter() * 1000000.0 / (double)SDL_GetPerformanceFrequency();
@@ -331,6 +340,10 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
   g_vc++;
   if (!d || d == (const void *)-1 || w == 0 || h == 0) return;
   g_vnz = 1;
+  g_dp = d;
+  g_dw = w;
+  g_dh = h;
+  g_dpitch = p;
 
   if (!g_tex || g_tw != (int)w || g_th != (int)h) {
     if (g_tex) SDL_DestroyTexture(g_tex);
@@ -383,7 +396,7 @@ static void poll(void) {
   g_btn = b;
   /* L3 cambia el modo de imagen, R3 cambia cada cuantos frames se dibuja */
   uint32_t nuevos = b & ~g_btn_prev;
-  if (nuevos & PB_L3) g_modo = (g_modo + 1) % 3;
+  if (nuevos & PB_L3) g_modo = (g_modo + 1) % 4;
   if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
   g_btn_prev = b;
 }
@@ -436,15 +449,61 @@ static void dibujar(void) {
   SDL_RenderPresent(R);
 }
 
+/* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel */
+static int escalar_propio(int *ow, int *oh) {
+  if (!g_dp || g_dw == 0 || g_dh == 0) return 0;
+  if (g_pf != 2 && g_pf != 0) return 0;
+  int w = (int)g_dw, h = (int)g_dh;
+  int k = 1920 / w;
+  int k2 = 1080 / h;
+  if (k2 < k) k = k2;
+  if (k < 1) k = 1;
+  int W = w * k, H = h * k;
+  const unsigned char *src = (const unsigned char *)g_dp;
+  for (int y = 0; y < h; y++) {
+    const uint16_t *s = (const uint16_t *)(src + (size_t)y * g_dpitch);
+    uint16_t *d = g_sbuf + (size_t)(y * k) * W;
+    for (int x = 0; x < w; x++) {
+      uint16_t v = s[x];
+      for (int j = 0; j < k; j++) d[x * k + j] = v;
+    }
+    for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
+  }
+  if (!g_tex2 || g_t2w != W || g_t2h != H) {
+    if (g_tex2) SDL_DestroyTexture(g_tex2);
+    Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
+    g_tex2 = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, W, H);
+    g_t2w = W;
+    g_t2h = H;
+    esp("TEXTURA2 %dx%d k=%d ptr=%p", W, H, k, (void *)g_tex2);
+  }
+  if (!g_tex2) return 0;
+  SDL_UpdateTexture(g_tex2, NULL, g_sbuf, W * 2);
+  *ow = W;
+  *oh = H;
+  return 1;
+}
+
 /* Pantalla de juego: imagen segun el modo, con tiempos */
 static void dibujar_juego(void) {
   double t0 = ahora_us();
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
   SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
-  if (g_tex && g_tw > 0 && g_th > 0) {
+  int hecho = 0;
+  double te0 = ahora_us();
+  if (g_modo == 3) {
+    int W = 0, H = 0;
+    if (escalar_propio(&W, &H)) {
+      SDL_Rect dst = {(1920 - W) / 2, (1080 - H) / 2, W, H};
+      SDL_RenderCopy(R, g_tex2, NULL, &dst);
+      hecho = 1;
+    }
+  }
+  a_esc += ahora_us() - te0;
+  if (!hecho && g_tex && g_tw > 0 && g_th > 0) {
     int dw = g_tw, dh = g_th;
-    if (g_modo == 1) {
+    if (g_modo == 1 || g_modo == 3) {
       int k = 1080 / g_th;
       if (k < 1) k = 1;
       dh = g_th * k;
@@ -459,9 +518,9 @@ static void dibujar_juego(void) {
   }
   double t1 = ahora_us();
   SDL_RenderSetScale(R, 2, 2);
-  char t[200];
-  snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d modo:%d cada:%d pad:%x %ux%u", g_frames,
-           m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, g_modo, g_cada, (unsigned)g_btn, g_vw, g_vh);
+  char t[220];
+  snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d esc:%d.%d modo:%d cada:%d pad:%x %ux%u %s", g_frames,
+           m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, m_esc / 10, m_esc % 10, g_modo, g_cada, (unsigned)g_btn, g_vw, g_vh, g_rend);
   texto(5, 5, t);
   double t2 = ahora_us();
   SDL_RenderPresent(R);
@@ -487,13 +546,25 @@ static void paso(const char *s) {
 int main(void) {
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
-  R = SDL_CreateRenderer(w, -1, 0);
+  R = SDL_CreateRenderer(w, -1, SDL_RENDERER_ACCELERATED);
+  int acel = R ? 1 : 0;
+  if (!R) R = SDL_CreateRenderer(w, -1, 0);
+  if (!R) R = SDL_CreateRenderer(w, -1, SDL_RENDERER_SOFTWARE);
   g_main = SDL_ThreadID();
   mkdir("/data/swan", 0777);
 
   g_interp = existe("/data/swan/interp.txt") ? 1 : 0;
   g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   esp("ARRANQUE interp=%d", g_interp);
+
+  SDL_RendererInfo ri;
+  memset(&ri, 0, sizeof(ri));
+  if (R && SDL_GetRendererInfo(R, &ri) == 0 && ri.name) {
+    snprintf(g_rend, sizeof(g_rend), "%.30s", ri.name);
+    esp("RENDERER acel_pedido_ok=%d nombre=%s flags=%x", acel, ri.name, (unsigned)ri.flags);
+  } else {
+    esp("RENDERER sin info (R=%p)", (void *)R);
+  }
 
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
@@ -520,7 +591,7 @@ int main(void) {
   char t[160];
   snprintf(t, sizeof(t), "%s %s API %u", info.library_name ? info.library_name : "?", info.library_version ? info.library_version : "?", retro_api_version());
   paso(t);
-  snprintf(t, sizeof(t), "fd=%d interp=%d sig=%d,%d,%d pad=%d", g_fd, g_interp, s1, s2, s3, g_pad);
+  snprintf(t, sizeof(t), "fd=%d interp=%d pad=%d rend=%s", g_fd, g_interp, g_pad, g_rend);
   paso(t);
 
   retro_set_environment(entorno);
@@ -581,8 +652,9 @@ int main(void) {
       m_upd = n_upd ? (int)(a_upd / n_upd / 100.0) : 0;
       m_cop = n_dib ? (int)(a_cop / n_dib / 100.0) : 0;
       m_pre = n_dib ? (int)(a_pre / n_dib / 100.0) : 0;
-      esp("frame %d run=%d upd=%d cop=%d pre=%d modo=%d cada=%d pad=%x", i, m_run, m_upd, m_cop, m_pre, g_modo, g_cada, (unsigned)g_btn);
-      a_run = a_upd = a_cop = a_pre = 0;
+      m_esc = n_dib ? (int)(a_esc / n_dib / 100.0) : 0;
+      esp("frame %d run=%d upd=%d cop=%d pre=%d esc=%d modo=%d cada=%d pad=%x", i, m_run, m_upd, m_cop, m_pre, m_esc, g_modo, g_cada, (unsigned)g_btn);
+      a_run = a_upd = a_cop = a_pre = a_esc = 0;
       n_upd = n_dib = 0;
     }
   }
