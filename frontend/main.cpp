@@ -97,6 +97,8 @@ void retro_run(void);
 }
 
 static SDL_Renderer *R;
+static SDL_Texture *g_tex = NULL;
+static int g_tw = 0, g_th = 0;
 static SDL_threadID g_main = 0;
 static char lineas[24][100];
 static int nl = 0;
@@ -112,6 +114,7 @@ static volatile int g_traza = 0;
 static volatile int g_dentro = 0;
 static int g_fd = -1;
 static int g_interp = 0;
+static int g_jugando = 0;
 
 static void dibujar(void);
 
@@ -147,7 +150,7 @@ static void log_core(int nivel, const char *fmt, ...) {
     if (*p == '\n' || *p == '\r') *p = ' ';
   }
   esp("LOG: %s", tmp);
-  if (g_traza) return;
+  if (g_traza || g_jugando) return;
   char *d = logbuf[nlog % 16];
   snprintf(d, sizeof(logbuf[0]), "%s", tmp);
   nlog++;
@@ -289,16 +292,30 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
   g_vw = w;
   g_vh = h;
   g_vc++;
-  if (d && d != (const void *)-1) {
-    const unsigned char *b = (const unsigned char *)d;
-    size_t n = (size_t)h * p;
-    if (n > 400000) n = 400000;
-    int nz = 0;
-    for (size_t i = 0; i < n; i += 7) {
-      if (b[i]) { nz = 1; break; }
-    }
-    g_vnz = nz;
+  if (!d || d == (const void *)-1 || w == 0 || h == 0) return;
+
+  /* comprobar si hay algun byte distinto de 0 */
+  const unsigned char *b = (const unsigned char *)d;
+  size_t n = (size_t)h * p;
+  if (n > 400000) n = 400000;
+  int nz = 0;
+  for (size_t i = 0; i < n; i += 7) {
+    if (b[i]) { nz = 1; break; }
   }
+  g_vnz = nz;
+
+  /* crear o recrear la textura si cambia el tamano */
+  if (!g_tex || g_tw != (int)w || g_th != (int)h) {
+    if (g_tex) SDL_DestroyTexture(g_tex);
+    Uint32 fmt = SDL_PIXELFORMAT_RGB565;
+    if (g_pf == 0) fmt = SDL_PIXELFORMAT_ARGB1555;
+    if (g_pf == 1) fmt = SDL_PIXELFORMAT_RGB888;
+    g_tex = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, (int)w, (int)h);
+    g_tw = (int)w;
+    g_th = (int)h;
+    esp("TEXTURA %dx%d fmt=%d ptr=%p", g_tw, g_th, g_pf, (void *)g_tex);
+  }
+  if (g_tex) SDL_UpdateTexture(g_tex, NULL, d, (int)p);
 }
 static void audio1(int16_t l, int16_t r) { (void)l; (void)r; }
 static size_t audio2(const int16_t *d, size_t n) { (void)d; return n; }
@@ -348,6 +365,22 @@ static void dibujar(void) {
     texto(10, y, t);
     y += 14;
   }
+  SDL_RenderPresent(R);
+}
+
+/* Pantalla de juego: imagen del nucleo a 4:3 y una linea de texto */
+static void dibujar_juego(void) {
+  SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
+  SDL_RenderClear(R);
+  SDL_RenderSetScale(R, 1, 1);
+  if (g_tex) {
+    SDL_Rect dst = {240, 0, 1440, 1080};
+    SDL_RenderCopy(R, g_tex, NULL, &dst);
+  }
+  SDL_RenderSetScale(R, 2, 2);
+  char t[160];
+  snprintf(t, sizeof(t), "F:%d  ms:%d  %ux%u  px:%d", g_frames, g_ms, g_vw, g_vh, g_vnz);
+  texto(5, 5, t);
   SDL_RenderPresent(R);
 }
 
@@ -434,20 +467,24 @@ int main(void) {
     SDL_Quit();
     return 0;
   }
-  paso("4) load_game OK; ejecutando 600 frames...");
-  esp("INICIO frames (espia sigue activo)");
+  paso("4) load_game OK; mostrando imagen...");
+  esp("INICIO frames (sin limite)");
+  g_jugando = 1;
   unsigned t0 = SDL_GetTicks();
-  for (int i = 0; i < 600; i++) {
-    esp("frame %d ini t=%u", i + 1, SDL_GetTicks() - t0);
+  unsigned tv = t0;
+  int i = 0;
+  for (;;) {
+    if (i < 5 || i % 60 == 0) esp("frame %d ini t=%u", i + 1, SDL_GetTicks() - t0);
     retro_run();
-    g_frames = i + 1;
-    g_ms = (int)((SDL_GetTicks() - t0) / (unsigned)(i + 1));
-    dibujar();
+    i++;
+    g_frames = i;
+    if (i % 60 == 0) {
+      unsigned ahora = SDL_GetTicks();
+      g_ms = (int)((ahora - tv) / 60);
+      tv = ahora;
+    }
+    SDL_PumpEvents();
+    dibujar_juego();
   }
-  g_traza = 0;
-  esp("FIN 600 frames");
-  paso("5) 600 frames terminados");
-  esperar(1800);
-  SDL_Quit();
   return 0;
 }
