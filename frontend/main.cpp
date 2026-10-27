@@ -259,7 +259,11 @@ static bool entorno(unsigned cmd, void *data) {
       }
       if (contiene(v->key, "Logging_LogLevel")) {
         v->value = "Debug";
-        if (!g_traza) esp("  -> respondido Debug");
+        return true;
+      }
+      if (contiene(v->key, "ReadaheadSectors")) {
+        v->value = "0";
+        if (!g_traza) esp("  -> respondido 0 (sin lectura anticipada)");
         return true;
       }
       if (g_interp && contiene(v->key, "executionmode")) {
