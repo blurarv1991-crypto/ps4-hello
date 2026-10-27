@@ -72,6 +72,17 @@ static void log_core(int nivel, const char *fmt, ...) {
   }
 }
 
+static bool contiene(const char *s, const char *sub) {
+  if (!s) return false;
+  size_t n = strlen(sub);
+  for (; *s; s++) {
+    size_t i = 0;
+    while (i < n && s[i] && ((s[i] | 32) == (sub[i] | 32))) i++;
+    if (i == n) return true;
+  }
+  return false;
+}
+
 static bool entorno(unsigned cmd, void *data) {
   g_cmd = (int)cmd;
   g_ncmd++;
@@ -82,7 +93,16 @@ static bool entorno(unsigned cmd, void *data) {
     case 9: *(const char **)data = "/data/swan"; return true;
     case 10: return true;
     case 11: return true;
-    case 15: ((retro_variable *)data)->value = NULL; return false;
+    case 15: {
+      retro_variable *v = (retro_variable *)data;
+      if (contiene(v->key, "fastmem")) {
+        v->value = "Disabled";
+        log_core(0, "VAR %s = Disabled", v->key);
+        return true;
+      }
+      v->value = NULL;
+      return false;
+    }
     case 16: return true;
     case 17: *(bool *)data = false; return true;
     case 27: ((retro_log_callback *)data)->log = log_core; return true;
@@ -192,7 +212,7 @@ int main(void) {
   paso("2) retro_init OK");
 
   const char *bios[] = {"scph5501.bin", "scph1001.bin", "scph5500.bin", "scph5502.bin", "scph7001.bin", "scph7502.bin"};
-  char b[160] = "BIOS:";
+  char b[160] = "BIOS (por nombre):";
   int hay = 0;
   for (int i = 0; i < 6; i++) {
     char p[96];
