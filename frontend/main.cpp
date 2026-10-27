@@ -4,10 +4,16 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <string.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include "stb_easy_font.h"
+
+#ifndef SHM_ANON
+#define SHM_ANON ((const char *)1)
+#endif
 
 static long long tam_ruta(const char *p) {
   FILE *f = fopen(p, "rb");
@@ -91,7 +97,7 @@ void retro_run(void);
 
 static SDL_Renderer *R;
 static SDL_threadID g_main = 0;
-static char lineas[16][100];
+static char lineas[24][100];
 static int nl = 0;
 static char logbuf[10][130];
 static int nlog = 0;
@@ -230,23 +236,67 @@ static void esperar(int frames) {
 
 static void paso(const char *s) {
   snprintf(lineas[nl], sizeof(lineas[0]), "%.90s", s);
-  if (nl < 15) nl++;
-  esperar(100);
+  if (nl < 23) nl++;
+  esperar(45);
 }
 
-static void diag(const char *nombre) {
-  char p[120], t[160];
-  snprintf(p, sizeof(p), "/data/swan/%s", nombre);
-  FILE *f = fopen(p, "rb");
-  if (!f) return;
-  fseek(f, 0, SEEK_END);
-  long long n = (long long)ftell(f);
-  fclose(f);
-  struct stat sb;
-  memset(&sb, 0, sizeof(sb));
-  int r = stat(p, &sb);
-  snprintf(t, sizeof(t), "D) %s ftell=%lld stat=%d size=%lld", nombre, n, r, (long long)sb.st_size);
+static void pruebas(void) {
+  char t[160];
+  paso("T5) shm_open ANON con O_CREAT|O_EXCL...");
+  int fd = shm_open(SHM_ANON, O_CREAT | O_EXCL | O_RDWR, 0600);
+  snprintf(t, sizeof(t), "T5) shm_open devolvio %d", fd);
   paso(t);
+  if (fd >= 0) {
+    size_t n = 16u * 1024u * 1024u;
+    int rf = ftruncate(fd, (off_t)n);
+    snprintf(t, sizeof(t), "T5) ftruncate 16MB devolvio %d", rf);
+    paso(t);
+    paso("T5) vista compartida 1...");
+    void *m = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) {
+      paso("T5) vista 1 FALLO");
+    } else {
+      memset(m, 0x55, n);
+      paso("T5) vista 1 OK y escrita");
+      paso("T5) vista compartida 2...");
+      void *m2 = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      if (m2 == MAP_FAILED) {
+        paso("T5) vista 2 FALLO");
+      } else {
+        snprintf(t, sizeof(t), "T5) vista 2 OK, dato leido=%d (85 = comparte)", (int)((unsigned char *)m2)[100]);
+        paso(t);
+      }
+    }
+    paso("T5) reserva 64MB + vista fija encima...");
+    void *rs = mmap(NULL, 64u * 1024u * 1024u, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (rs == MAP_FAILED) {
+      paso("T5) reserva FALLO");
+    } else {
+      void *fx = mmap(rs, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+      snprintf(t, sizeof(t), "T5) vista fija %s", fx == MAP_FAILED ? "FALLO" : "OK");
+      paso(t);
+    }
+  }
+
+  unsigned mbs[3] = {8, 32, 48};
+  for (int i = 0; i < 3; i++) {
+    size_t n = (size_t)mbs[i] * 1024u * 1024u;
+    snprintf(t, sizeof(t), "T6) JIT RWX %uMB...", mbs[i]);
+    paso(t);
+    void *c = mmap(NULL, n, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (c == MAP_FAILED) {
+      snprintf(t, sizeof(t), "T6) %uMB FALLO", mbs[i]);
+      paso(t);
+    } else {
+      unsigned char *u = (unsigned char *)c;
+      u[0] = 0xC3;
+      u[n - 1] = 0xC3;
+      ((void (*)(void))u)();
+      ((void (*)(void))(u + n - 1))();
+      snprintf(t, sizeof(t), "T6) %uMB OK (ejecuta al inicio y al final)", mbs[i]);
+      paso(t);
+    }
+  }
 }
 
 int main(void) {
@@ -273,8 +323,7 @@ int main(void) {
   retro_init();
   paso("2) retro_init OK");
 
-  diag("scph7502-eu.bin");
-  diag("juego.bin");
+  pruebas();
 
   const char *juegos[] = {"/data/swan/juego.chd", "/data/swan/juego.cue", "/data/swan/juego.pbp", "/data/swan/juego.iso", "/data/swan/juego.bin"};
   const char *ruta = NULL;
