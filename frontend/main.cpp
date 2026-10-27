@@ -4,15 +4,8 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include "stb_easy_font.h"
-
-#ifndef SHM_ANON
-#define SHM_ANON ((const char *)1)
-#endif
 
 extern "C" {
 struct retro_system_info {
@@ -49,9 +42,10 @@ void retro_run(void);
 }
 
 static SDL_Renderer *R;
+static SDL_threadID g_main = 0;
 static char lineas[16][100];
 static int nl = 0;
-static char logbuf[6][110];
+static char logbuf[10][130];
 static int nlog = 0;
 static int g_cmd = 0;
 static int g_ncmd = 0;
@@ -59,9 +53,11 @@ static unsigned g_vw = 0, g_vh = 0;
 static int g_vc = 0, g_vnz = 0;
 static int g_frames = 0, g_ms = 0;
 
+static void dibujar(void);
+
 static void log_core(int nivel, const char *fmt, ...) {
   (void)nivel;
-  char *d = logbuf[nlog % 6];
+  char *d = logbuf[nlog % 10];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(d, sizeof(logbuf[0]), fmt, ap);
@@ -70,6 +66,10 @@ static void log_core(int nivel, const char *fmt, ...) {
     if (*p == '\n' || *p == '\r') *p = ' ';
   }
   nlog++;
+  if (SDL_ThreadID() == g_main) {
+    dibujar();
+    SDL_Delay(150);
+  }
 }
 
 static bool entorno(unsigned cmd, void *data) {
@@ -132,9 +132,9 @@ static void texto(float x, float y, const char *s) {
 static void dibujar(void) {
   SDL_SetRenderDrawColor(R, 0, 0, 80, 255);
   SDL_RenderClear(R);
-  SDL_RenderSetScale(R, 3, 3);
+  SDL_RenderSetScale(R, 2, 2);
   float y = 10;
-  char t[160];
+  char t[200];
   for (int i = 0; i < nl; i++) {
     texto(10, y, lineas[i]);
     y += 14;
@@ -145,9 +145,9 @@ static void dibujar(void) {
   snprintf(t, sizeof(t), "Frames: %d  ms/frame: %d  video: %ux%u  px!=0: %d", g_frames, g_ms, g_vw, g_vh, g_vnz);
   texto(10, y, t);
   y += 14;
-  int ini = nlog > 6 ? nlog - 6 : 0;
+  int ini = nlog > 10 ? nlog - 10 : 0;
   for (int i = ini; i < nlog; i++) {
-    snprintf(t, sizeof(t), "LOG: %.80s", logbuf[i % 6]);
+    snprintf(t, sizeof(t), "LOG: %.120s", logbuf[i % 10]);
     texto(10, y, t);
     y += 14;
   }
@@ -167,67 +167,11 @@ static void paso(const char *s) {
   esperar(100);
 }
 
-static void pruebas(void) {
-  char t[160];
-  unsigned mb[4] = {64, 128, 256, 512};
-  strcpy(t, "T1) RAM:");
-  for (int i = 0; i < 4; i++) {
-    size_t n = (size_t)mb[i] * 1024 * 1024;
-    void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    char s[24];
-    if (p != MAP_FAILED) {
-      snprintf(s, sizeof(s), " %uMB:si", mb[i]);
-      munmap(p, n);
-    } else {
-      snprintf(s, sizeof(s), " %uMB:no", mb[i]);
-    }
-    strncat(t, s, sizeof(t) - strlen(t) - 1);
-  }
-  paso(t);
-
-  paso("T2) mmap normal + mprotect a ejecutable...");
-  void *d = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-  if (d == MAP_FAILED) {
-    paso("T2) FALLO el mmap normal");
-  } else {
-    ((unsigned char *)d)[0] = 0xC3;
-    int r = mprotect(d, 65536, PROT_READ | PROT_EXEC);
-    snprintf(t, sizeof(t), "T2) mprotect a ejecutable devolvio %d", r);
-    paso(t);
-    if (r == 0) {
-      paso("T2) ejecutando codigo...");
-      ((void (*)(void))d)();
-      paso("T2) OK: codigo ejecutado");
-    }
-  }
-
-  paso("T3) mmap directo con permiso de ejecucion...");
-  void *c = mmap(NULL, 65536, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
-  if (c == MAP_FAILED) {
-    paso("T3) FALLO: no da memoria ejecutable");
-  } else {
-    ((unsigned char *)c)[0] = 0xC3;
-    paso("T3) ejecutando codigo...");
-    ((void (*)(void))c)();
-    paso("T3) OK: codigo ejecutado");
-  }
-
-  paso("T4) memoria compartida shm_open...");
-  int fd = shm_open(SHM_ANON, O_RDWR, 0600);
-  if (fd < 0) {
-    paso("T4) shm_open FALLO");
-  } else {
-    int rf = ftruncate(fd, 1 << 20);
-    void *m = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    snprintf(t, sizeof(t), "T4) shm_open OK, ftruncate=%d, mmap=%s", rf, m == MAP_FAILED ? "FALLO" : "OK");
-    paso(t);
-  }
-}
-
 int main(void) {
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
   R = SDL_CreateRenderer(w, -1, 0);
+  g_main = SDL_ThreadID();
   mkdir("/data/swan", 0777);
 
   struct retro_system_info info;
@@ -246,8 +190,6 @@ int main(void) {
   paso("1) retro_init...");
   retro_init();
   paso("2) retro_init OK");
-
-  pruebas();
 
   const char *bios[] = {"scph5501.bin", "scph1001.bin", "scph5500.bin", "scph5502.bin", "scph7001.bin", "scph7502.bin"};
   char b[160] = "BIOS:";
