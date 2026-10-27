@@ -106,6 +106,7 @@ static int g_cmd = 0;
 static int g_ncmd = 0;
 static unsigned g_vw = 0, g_vh = 0;
 static int g_vc = 0, g_vnz = 0;
+static int g_pf = -1;
 static int g_frames = 0, g_ms = 0;
 static volatile int g_traza = 0;
 static volatile int g_dentro = 0;
@@ -236,13 +237,21 @@ static bool entorno(unsigned cmd, void *data) {
     case 6: return true;
     case 8: return true;
     case 9: *(const char **)data = "/data/swan"; return true;
-    case 10: return true;
+    case 10:
+      g_pf = *(int *)data;
+      esp("ENV10 formato pixel pedido=%d", g_pf);
+      return true;
     case 11: return true;
     case 15: {
       retro_variable *v = (retro_variable *)data;
       esp("ENV15 clave=%s", v->key ? v->key : "(null)");
       if (contiene(v->key, "fastmem")) {
         v->value = "Disabled";
+        return true;
+      }
+      if (contiene(v->key, "GPU_Renderer")) {
+        v->value = "Software";
+        esp("  -> respondido Software");
         return true;
       }
       if (g_interp && contiene(v->key, "executionmode")) {
@@ -267,7 +276,8 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
   g_vw = w;
   g_vh = h;
   g_vc++;
-  if (d) {
+  if (g_vc <= 3) esp("VIDEO llamada %d: %ux%u pitch=%llu datos=%p", g_vc, w, h, (unsigned long long)p, d);
+  if (d && d != (const void *)-1) {
     const unsigned char *b = (const unsigned char *)d;
     size_t n = (size_t)h * p;
     if (n > 400000) n = 400000;
@@ -315,6 +325,9 @@ static void dibujar(void) {
   texto(10, y, t);
   y += 14;
   snprintf(t, sizeof(t), "Frames: %d  ms/frame: %d  video: %ux%u  px!=0: %d", g_frames, g_ms, g_vw, g_vh, g_vnz);
+  texto(10, y, t);
+  y += 14;
+  snprintf(t, sizeof(t), "Llamadas video: %d  formato pixel: %d", g_vc, g_pf);
   texto(10, y, t);
   y += 14;
   int ini = nlog > 16 ? nlog - 16 : 0;
@@ -419,6 +432,7 @@ int main(void) {
     if (i < 3) esp("frame %d OK", i + 1);
     dibujar();
   }
+  esp("FIN 600 frames");
   paso("5) 600 frames terminados");
   esperar(1800);
   SDL_Quit();
