@@ -77,7 +77,27 @@ jobs:
           rm -f obj2/*gpu_hw_vulkan* obj2/*gpu_hw_opengl*
           L="ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 --allow-multiple-definition --no-demangle --wrap=stat --wrap=lstat --wrap=fstat --wrap=shm_open --wrap=shm_unlink --wrap=ftruncate --wrap=mmap --wrap=munmap --wrap=mprotect --wrap=madvise -L$OO/lib $OO/lib/crt1.o"
           LIBS="-lc -lkernel -lc++ -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSDL2"
-          : > stub.c
+          cat > stubhdr.c << 'EOF'
+          #include <fcntl.h>
+          #include <unistd.h>
+          #include <string.h>
+          void stub_hit(const char *n) {
+            static const char *v[200];
+            static int c = 0;
+            static int first = 1;
+            for (int i = 0; i < c; i++) if (v[i] == n) return;
+            if (c >= 200) return;
+            v[c++] = n;
+            int fd = open("/data/swan/stubs.txt", O_WRONLY | O_CREAT | (first ? O_TRUNC : O_APPEND), 0666);
+            first = 0;
+            if (fd < 0) return;
+            write(fd, n, strlen(n));
+            write(fd, "\n", 1);
+            fsync(fd);
+            close(fd);
+          }
+          EOF
+          cp stubhdr.c stub.c
           for i in 1 2 3 4 5; do
           clang --target=x86_64-pc-freebsd12-elf -fPIC -c -w -isysroot $OO -isystem $OO/include stub.c -o obj2/stub.o
           $L obj2/*.o $LIBS -o p3.elf > l2.txt 2>&1 || true
@@ -85,13 +105,15 @@ jobs:
           N=$(wc -l < s2.txt)
           echo ITER_$i PENDIENTES_$N
           if [ "$N" = "0" ]; then break; fi
-          while read s; do case $s in GLAD_*|glad_*) echo "int $s;";; *) echo "void $s(void) {}";; esac; done < s2.txt >> stub.c
+          while read s; do case $s in GLAD_*|glad_*) echo "int $s;";; *) echo "void $s(void) { stub_hit(\"$s\"); }";; esac; done < s2.txt >> stub.c
           done
           echo ELF; ls -la p3.elf 2>&1 | cut -c1-80
           echo RETRO_RUN; nm p3.elf 2>/dev/null | grep -c " T retro_run" || true
           echo MAIN; nm p3.elf 2>/dev/null | grep -c " T main" || true
           echo QUEDAN; head -12 s2.txt | cut -c1-90
           echo PRIMERAS; head -3 l2.txt | cut -c1-150
+          echo RELLENOS; grep -c 'stub_hit("' stub.c || true
+          grep -o 'stub_hit("[^"]*")' stub.c | cut -c11-100 | head -80 || true
       - name: Guardar elf
         uses: actions/upload-artifact@v4
         with:
