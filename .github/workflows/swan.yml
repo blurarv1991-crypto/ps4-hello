@@ -75,7 +75,7 @@ jobs:
           mkdir obj2
           cp obj/*.o obj2/
           rm -f obj2/*gpu_hw_vulkan* obj2/*gpu_hw_opengl*
-          L="ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 --allow-multiple-definition --no-demangle -L$OO/lib $OO/lib/crt1.o"
+          L="ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr --error-limit=0 --allow-multiple-definition --no-demangle --wrap=stat --wrap=lstat --wrap=fstat -L$OO/lib $OO/lib/crt1.o"
           LIBS="-lc -lkernel -lc++ -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSDL2"
           : > stub.c
           for i in 1 2 3 4 5; do
