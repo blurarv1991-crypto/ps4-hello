@@ -16,6 +16,8 @@ extern "C" {
 }
 #include "stb_easy_font.h"
 
+typedef OrbisPadData ScePadData;
+
 #ifndef SHM_ANON
 #define SHM_ANON ((char *)1)
 #endif
