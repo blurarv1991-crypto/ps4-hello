@@ -12,7 +12,7 @@
 #include "stb_easy_font.h"
 
 #ifndef SHM_ANON
-#define SHM_ANON ((const char *)1)
+#define SHM_ANON ((char *)1)
 #endif
 
 static long long tam_ruta(const char *p) {
@@ -99,19 +99,21 @@ static SDL_Renderer *R;
 static SDL_threadID g_main = 0;
 static char lineas[24][100];
 static int nl = 0;
-static char logbuf[10][130];
+static char logbuf[16][130];
 static int nlog = 0;
 static int g_cmd = 0;
 static int g_ncmd = 0;
 static unsigned g_vw = 0, g_vh = 0;
 static int g_vc = 0, g_vnz = 0;
 static int g_frames = 0, g_ms = 0;
+static int g_traza = 0;
+static int g_dentro = 0;
 
 static void dibujar(void);
 
 static void log_core(int nivel, const char *fmt, ...) {
   (void)nivel;
-  char *d = logbuf[nlog % 10];
+  char *d = logbuf[nlog % 16];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(d, sizeof(logbuf[0]), fmt, ap);
@@ -124,6 +126,67 @@ static void log_core(int nivel, const char *fmt, ...) {
     dibujar();
     SDL_Delay(150);
   }
+}
+
+#define TRAZA(...) do { if (g_traza && !g_dentro) { g_dentro = 1; log_core(0, __VA_ARGS__); g_dentro = 0; } } while (0)
+
+extern "C" {
+int __real_shm_open(const char *p, int fl, mode_t m);
+int __real_shm_unlink(const char *p);
+int __real_ftruncate(int fd, off_t n);
+void *__real_mmap(void *a, size_t l, int pr, int fl, int fd, off_t o);
+int __real_munmap(void *a, size_t l);
+int __real_mprotect(void *a, size_t l, int pr);
+int __real_madvise(void *a, size_t l, int b);
+
+int __wrap_shm_open(const char *p, int fl, mode_t m) {
+  TRAZA("T> shm_open %s fl=%x", (p == (const char *)1) ? "ANON" : p, fl);
+  int r = __real_shm_open(p, fl, m);
+  TRAZA("T< shm_open = %d", r);
+  return r;
+}
+
+int __wrap_shm_unlink(const char *p) {
+  TRAZA("T> shm_unlink %s", (p == (const char *)1) ? "ANON" : p);
+  int r = __real_shm_unlink(p);
+  TRAZA("T< shm_unlink = %d", r);
+  return r;
+}
+
+int __wrap_ftruncate(int fd, off_t n) {
+  TRAZA("T> ftruncate fd=%d len=%llu", fd, (unsigned long long)n);
+  int r = __real_ftruncate(fd, n);
+  TRAZA("T< ftruncate = %d", r);
+  return r;
+}
+
+void *__wrap_mmap(void *a, size_t l, int pr, int fl, int fd, off_t o) {
+  TRAZA("T> mmap len=%llu pr=%d fl=%x fd=%d off=%llu", (unsigned long long)l, pr, fl, fd, (unsigned long long)o);
+  void *r = __real_mmap(a, l, pr, fl, fd, o);
+  TRAZA("T< mmap = %p", r);
+  return r;
+}
+
+int __wrap_munmap(void *a, size_t l) {
+  TRAZA("T> munmap len=%llu", (unsigned long long)l);
+  int r = __real_munmap(a, l);
+  TRAZA("T< munmap = %d", r);
+  return r;
+}
+
+int __wrap_mprotect(void *a, size_t l, int pr) {
+  TRAZA("T> mprotect len=%llu pr=%d", (unsigned long long)l, pr);
+  int r = __real_mprotect(a, l, pr);
+  TRAZA("T< mprotect = %d", r);
+  return r;
+}
+
+int __wrap_madvise(void *a, size_t l, int b) {
+  TRAZA("T> madvise len=%llu adv=%d", (unsigned long long)l, b);
+  int r = __real_madvise(a, l, b);
+  TRAZA("T< madvise = %d", r);
+  return r;
+}
 }
 
 static bool contiene(const char *s, const char *sub) {
@@ -218,9 +281,9 @@ static void dibujar(void) {
   snprintf(t, sizeof(t), "Frames: %d  ms/frame: %d  video: %ux%u  px!=0: %d", g_frames, g_ms, g_vw, g_vh, g_vnz);
   texto(10, y, t);
   y += 14;
-  int ini = nlog > 10 ? nlog - 10 : 0;
+  int ini = nlog > 16 ? nlog - 16 : 0;
   for (int i = ini; i < nlog; i++) {
-    snprintf(t, sizeof(t), "LOG: %.120s", logbuf[i % 10]);
+    snprintf(t, sizeof(t), "LOG: %.120s", logbuf[i % 16]);
     texto(10, y, t);
     y += 14;
   }
@@ -237,66 +300,7 @@ static void esperar(int frames) {
 static void paso(const char *s) {
   snprintf(lineas[nl], sizeof(lineas[0]), "%.90s", s);
   if (nl < 23) nl++;
-  esperar(45);
-}
-
-static void pruebas(void) {
-  char t[160];
-  paso("T5) shm_open ANON con O_CREAT|O_EXCL...");
-  int fd = shm_open(SHM_ANON, O_CREAT | O_EXCL | O_RDWR, 0600);
-  snprintf(t, sizeof(t), "T5) shm_open devolvio %d", fd);
-  paso(t);
-  if (fd >= 0) {
-    size_t n = 16u * 1024u * 1024u;
-    int rf = ftruncate(fd, (off_t)n);
-    snprintf(t, sizeof(t), "T5) ftruncate 16MB devolvio %d", rf);
-    paso(t);
-    paso("T5) vista compartida 1...");
-    void *m = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (m == MAP_FAILED) {
-      paso("T5) vista 1 FALLO");
-    } else {
-      memset(m, 0x55, n);
-      paso("T5) vista 1 OK y escrita");
-      paso("T5) vista compartida 2...");
-      void *m2 = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-      if (m2 == MAP_FAILED) {
-        paso("T5) vista 2 FALLO");
-      } else {
-        snprintf(t, sizeof(t), "T5) vista 2 OK, dato leido=%d (85 = comparte)", (int)((unsigned char *)m2)[100]);
-        paso(t);
-      }
-    }
-    paso("T5) reserva 64MB + vista fija encima...");
-    void *rs = mmap(NULL, 64u * 1024u * 1024u, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (rs == MAP_FAILED) {
-      paso("T5) reserva FALLO");
-    } else {
-      void *fx = mmap(rs, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
-      snprintf(t, sizeof(t), "T5) vista fija %s", fx == MAP_FAILED ? "FALLO" : "OK");
-      paso(t);
-    }
-  }
-
-  unsigned mbs[3] = {8, 32, 48};
-  for (int i = 0; i < 3; i++) {
-    size_t n = (size_t)mbs[i] * 1024u * 1024u;
-    snprintf(t, sizeof(t), "T6) JIT RWX %uMB...", mbs[i]);
-    paso(t);
-    void *c = mmap(NULL, n, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (c == MAP_FAILED) {
-      snprintf(t, sizeof(t), "T6) %uMB FALLO", mbs[i]);
-      paso(t);
-    } else {
-      unsigned char *u = (unsigned char *)c;
-      u[0] = 0xC3;
-      u[n - 1] = 0xC3;
-      ((void (*)(void))u)();
-      ((void (*)(void))(u + n - 1))();
-      snprintf(t, sizeof(t), "T6) %uMB OK (ejecuta al inicio y al final)", mbs[i]);
-      paso(t);
-    }
-  }
+  esperar(60);
 }
 
 int main(void) {
@@ -323,8 +327,6 @@ int main(void) {
   retro_init();
   paso("2) retro_init OK");
 
-  pruebas();
-
   const char *juegos[] = {"/data/swan/juego.chd", "/data/swan/juego.cue", "/data/swan/juego.pbp", "/data/swan/juego.iso", "/data/swan/juego.bin"};
   const char *ruta = NULL;
   for (int i = 0; i < 5; i++) {
@@ -339,11 +341,13 @@ int main(void) {
   snprintf(t, sizeof(t), "Juego: %s", ruta);
   paso(t);
 
-  paso("3) retro_load_game...");
+  paso("3) retro_load_game (con espia T> / T<)...");
   struct retro_game_info gi;
   memset(&gi, 0, sizeof(gi));
   gi.path = ruta;
+  g_traza = 1;
   bool ok = retro_load_game(&gi);
+  g_traza = 0;
   if (!ok) {
     paso("3) load_game DEVOLVIO FALSE");
     esperar(1800);
