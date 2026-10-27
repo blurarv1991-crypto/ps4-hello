@@ -4,8 +4,56 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 #include "stb_easy_font.h"
+
+static long long tam_ruta(const char *p) {
+  FILE *f = fopen(p, "rb");
+  if (!f) return -1;
+  fseek(f, 0, SEEK_END);
+  long long n = (long long)ftell(f);
+  fclose(f);
+  return n;
+}
+
+extern "C" {
+int __real_stat(const char *p, struct stat *s);
+int __real_lstat(const char *p, struct stat *s);
+int __real_fstat(int fd, struct stat *s);
+
+int __wrap_stat(const char *p, struct stat *s) {
+  int r = __real_stat(p, s);
+  if (r == 0 && !S_ISDIR(s->st_mode)) {
+    long long n = tam_ruta(p);
+    if (n >= 0) s->st_size = n;
+  }
+  return r;
+}
+
+int __wrap_lstat(const char *p, struct stat *s) {
+  int r = __real_lstat(p, s);
+  if (r == 0 && !S_ISDIR(s->st_mode)) {
+    long long n = tam_ruta(p);
+    if (n >= 0) s->st_size = n;
+  }
+  return r;
+}
+
+int __wrap_fstat(int fd, struct stat *s) {
+  int r = __real_fstat(fd, s);
+  if (r == 0 && !S_ISDIR(s->st_mode)) {
+    off_t cur = lseek(fd, 0, SEEK_CUR);
+    off_t fin = lseek(fd, 0, SEEK_END);
+    if (cur >= 0 && fin >= 0) {
+      s->st_size = fin;
+      lseek(fd, cur, SEEK_SET);
+    }
+  }
+  return r;
+}
+}
 
 extern "C" {
 struct retro_system_info {
@@ -197,7 +245,7 @@ static void diag(const char *nombre) {
   struct stat sb;
   memset(&sb, 0, sizeof(sb));
   int r = stat(p, &sb);
-  snprintf(t, sizeof(t), "D) %s ftell=%lld stat=%d size=%lld sz=%d", nombre, n, r, (long long)sb.st_size, (int)sizeof(sb));
+  snprintf(t, sizeof(t), "D) %s ftell=%lld stat=%d size=%lld", nombre, n, r, (long long)sb.st_size);
   paso(t);
 }
 
@@ -226,7 +274,6 @@ int main(void) {
   paso("2) retro_init OK");
 
   diag("scph7502-eu.bin");
-  diag("scph7502.bin");
   diag("juego.bin");
 
   const char *juegos[] = {"/data/swan/juego.chd", "/data/swan/juego.cue", "/data/swan/juego.pbp", "/data/swan/juego.iso", "/data/swan/juego.bin"};
