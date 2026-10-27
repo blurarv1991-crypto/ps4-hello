@@ -97,7 +97,6 @@ static bool entorno(unsigned cmd, void *data) {
       retro_variable *v = (retro_variable *)data;
       if (contiene(v->key, "fastmem")) {
         v->value = "Disabled";
-        log_core(0, "VAR %s = Disabled", v->key);
         return true;
       }
       v->value = NULL;
@@ -187,6 +186,21 @@ static void paso(const char *s) {
   esperar(100);
 }
 
+static void diag(const char *nombre) {
+  char p[120], t[160];
+  snprintf(p, sizeof(p), "/data/swan/%s", nombre);
+  FILE *f = fopen(p, "rb");
+  if (!f) return;
+  fseek(f, 0, SEEK_END);
+  long long n = (long long)ftell(f);
+  fclose(f);
+  struct stat sb;
+  memset(&sb, 0, sizeof(sb));
+  int r = stat(p, &sb);
+  snprintf(t, sizeof(t), "D) %s ftell=%lld stat=%d size=%lld sz=%d", nombre, n, r, (long long)sb.st_size, (int)sizeof(sb));
+  paso(t);
+}
+
 int main(void) {
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
@@ -211,20 +225,9 @@ int main(void) {
   retro_init();
   paso("2) retro_init OK");
 
-  const char *bios[] = {"scph5501.bin", "scph1001.bin", "scph5500.bin", "scph5502.bin", "scph7001.bin", "scph7502.bin"};
-  char b[160] = "BIOS (por nombre):";
-  int hay = 0;
-  for (int i = 0; i < 6; i++) {
-    char p[96];
-    snprintf(p, sizeof(p), "/data/swan/%s", bios[i]);
-    if (existe(p)) {
-      strncat(b, " ", sizeof(b) - strlen(b) - 1);
-      strncat(b, bios[i], sizeof(b) - strlen(b) - 1);
-      hay = 1;
-    }
-  }
-  if (!hay) strncat(b, " ninguno", sizeof(b) - strlen(b) - 1);
-  paso(b);
+  diag("scph7502-eu.bin");
+  diag("scph7502.bin");
+  diag("juego.bin");
 
   const char *juegos[] = {"/data/swan/juego.chd", "/data/swan/juego.cue", "/data/swan/juego.pbp", "/data/swan/juego.iso", "/data/swan/juego.bin"};
   const char *ruta = NULL;
