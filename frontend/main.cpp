@@ -253,6 +253,11 @@ static bool entorno(unsigned cmd, void *data) {
         v->value = "Software";
         return true;
       }
+      if (contiene(v->key, "GPU_UseThread")) {
+        v->value = "false";
+        if (!g_traza) esp("  -> respondido false (sin hilo GPU)");
+        return true;
+      }
       if (g_interp && contiene(v->key, "executionmode")) {
         v->value = "Interpreter";
         return true;
