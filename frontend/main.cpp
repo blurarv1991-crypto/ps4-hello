@@ -106,21 +106,43 @@ static int g_ncmd = 0;
 static unsigned g_vw = 0, g_vh = 0;
 static int g_vc = 0, g_vnz = 0;
 static int g_frames = 0, g_ms = 0;
-static int g_traza = 0;
-static int g_dentro = 0;
+static volatile int g_traza = 0;
+static volatile int g_dentro = 0;
+static int g_fd = -1;
 
 static void dibujar(void);
 
-static void log_core(int nivel, const char *fmt, ...) {
-  (void)nivel;
-  char *d = logbuf[nlog % 16];
+/* Escribe una linea en espia.txt sin dibujar y sin pedir memoria */
+static void esp(const char *fmt, ...) {
+  if (g_fd < 0) return;
+  char b[300];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(d, sizeof(logbuf[0]), fmt, ap);
+  int n = vsnprintf(b, sizeof(b) - 1, fmt, ap);
   va_end(ap);
-  for (char *p = d; *p; p++) {
+  if (n < 0) return;
+  if (n > (int)sizeof(b) - 2) n = (int)sizeof(b) - 2;
+  b[n++] = '\n';
+  write(g_fd, b, (size_t)n);
+  fsync(g_fd);
+}
+
+static void log_core(int nivel, const char *fmt, ...) {
+  (void)nivel;
+  char tmp[200];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(tmp, sizeof(tmp), fmt, ap);
+  va_end(ap);
+  for (char *p = tmp; *p; p++) {
     if (*p == '\n' || *p == '\r') *p = ' ';
   }
+  if (g_traza) {
+    esp("LOG: %s", tmp);
+    return;
+  }
+  char *d = logbuf[nlog % 16];
+  snprintf(d, sizeof(logbuf[0]), "%s", tmp);
   nlog++;
   if (SDL_ThreadID() == g_main) {
     dibujar();
@@ -128,7 +150,7 @@ static void log_core(int nivel, const char *fmt, ...) {
   }
 }
 
-#define TRAZA(...) do { if (g_traza && !g_dentro) { g_dentro = 1; log_core(0, __VA_ARGS__); g_dentro = 0; } } while (0)
+#define TRAZA(...) do { if (g_traza && !g_dentro) { g_dentro = 1; esp(__VA_ARGS__); g_dentro = 0; } } while (0)
 
 extern "C" {
 int __real_shm_open(const char *p, int fl, mode_t m);
@@ -161,7 +183,7 @@ int __wrap_ftruncate(int fd, off_t n) {
 }
 
 void *__wrap_mmap(void *a, size_t l, int pr, int fl, int fd, off_t o) {
-  TRAZA("T> mmap len=%llu pr=%d fl=%x fd=%d off=%llu", (unsigned long long)l, pr, fl, fd, (unsigned long long)o);
+  TRAZA("T> mmap addr=%p len=%llu pr=%d fl=%x fd=%d off=%llu", a, (unsigned long long)l, pr, fl, fd, (unsigned long long)o);
   void *r = __real_mmap(a, l, pr, fl, fd, o);
   TRAZA("T< mmap = %p", r);
   return r;
@@ -212,6 +234,7 @@ static bool entorno(unsigned cmd, void *data) {
     case 11: return true;
     case 15: {
       retro_variable *v = (retro_variable *)data;
+      if (g_traza) esp("ENV15 clave=%s", v->key ? v->key : "(null)");
       if (contiene(v->key, "fastmem")) {
         v->value = "Disabled";
         return true;
@@ -223,7 +246,9 @@ static bool entorno(unsigned cmd, void *data) {
     case 17: *(bool *)data = false; return true;
     case 27: ((retro_log_callback *)data)->log = log_core; return true;
     case 31: *(const char **)data = "/data/swan"; return true;
-    default: return false;
+    default:
+      if (g_traza) esp("ENV cmd=%u rechazado", cmd);
+      return false;
   }
 }
 
@@ -341,13 +366,17 @@ int main(void) {
   snprintf(t, sizeof(t), "Juego: %s", ruta);
   paso(t);
 
-  paso("3) retro_load_game (con espia T> / T<)...");
+  g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  snprintf(t, sizeof(t), "3) load_game: espia.txt fd=%d (pantalla quieta)", g_fd);
+  paso(t);
   struct retro_game_info gi;
   memset(&gi, 0, sizeof(gi));
   gi.path = ruta;
+  esp("INICIO retro_load_game");
   g_traza = 1;
   bool ok = retro_load_game(&gi);
   g_traza = 0;
+  esp("FIN retro_load_game = %d", ok ? 1 : 0);
   if (!ok) {
     paso("3) load_game DEVOLVIO FALSE");
     esperar(1800);
