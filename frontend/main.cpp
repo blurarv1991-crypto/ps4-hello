@@ -109,7 +109,8 @@ static int g_ncmd = 0;
 static unsigned g_vw = 0, g_vh = 0;
 static int g_vc = 0, g_vnz = 0;
 static int g_pf = -1;
-static int g_frames = 0, g_ms = 0;
+static int g_frames = 0;
+static int g_run_ms = 0, g_dib_ms = 0;
 static volatile int g_traza = 0;
 static volatile int g_dentro = 0;
 static int g_fd = -1;
@@ -141,6 +142,7 @@ static void al_fallo(int sig, siginfo_t *si, void *ctx) {
 
 static void log_core(int nivel, const char *fmt, ...) {
   (void)nivel;
+  if (g_jugando) return;
   char tmp[200];
   va_list ap;
   va_start(ap, fmt);
@@ -150,7 +152,7 @@ static void log_core(int nivel, const char *fmt, ...) {
     if (*p == '\n' || *p == '\r') *p = ' ';
   }
   esp("LOG: %s", tmp);
-  if (g_traza || g_jugando) return;
+  if (g_traza) return;
   char *d = logbuf[nlog % 16];
   snprintf(d, sizeof(logbuf[0]), "%s", tmp);
   nlog++;
@@ -160,7 +162,7 @@ static void log_core(int nivel, const char *fmt, ...) {
   }
 }
 
-#define TRAZA(...) do { if (g_traza && !g_dentro) { g_dentro = 1; esp(__VA_ARGS__); g_dentro = 0; } } while (0)
+#define TRAZA(...) do { if (g_traza && !g_jugando && !g_dentro) { g_dentro = 1; esp(__VA_ARGS__); g_dentro = 0; } } while (0)
 
 extern "C" {
 int __real_shm_open(const char *p, int fl, mode_t m);
@@ -260,13 +262,8 @@ static bool entorno(unsigned cmd, void *data) {
         v->value = "false";
         return true;
       }
-      if (contiene(v->key, "Logging_LogLevel")) {
-        v->value = "Debug";
-        return true;
-      }
       if (contiene(v->key, "ReadaheadSectors")) {
         v->value = "0";
-        if (!g_traza) esp("  -> respondido 0 (sin lectura anticipada)");
         return true;
       }
       if (g_interp && contiene(v->key, "executionmode")) {
@@ -293,18 +290,8 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
   g_vh = h;
   g_vc++;
   if (!d || d == (const void *)-1 || w == 0 || h == 0) return;
+  g_vnz = 1;
 
-  /* comprobar si hay algun byte distinto de 0 */
-  const unsigned char *b = (const unsigned char *)d;
-  size_t n = (size_t)h * p;
-  if (n > 400000) n = 400000;
-  int nz = 0;
-  for (size_t i = 0; i < n; i += 7) {
-    if (b[i]) { nz = 1; break; }
-  }
-  g_vnz = nz;
-
-  /* crear o recrear la textura si cambia el tamano */
   if (!g_tex || g_tw != (int)w || g_th != (int)h) {
     if (g_tex) SDL_DestroyTexture(g_tex);
     Uint32 fmt = SDL_PIXELFORMAT_RGB565;
@@ -353,12 +340,6 @@ static void dibujar(void) {
   snprintf(t, sizeof(t), "Ultimo cmd entorno: %d (total %d)", g_cmd, g_ncmd);
   texto(10, y, t);
   y += 14;
-  snprintf(t, sizeof(t), "Frames: %d  ms/frame: %d  video: %ux%u  px!=0: %d", g_frames, g_ms, g_vw, g_vh, g_vnz);
-  texto(10, y, t);
-  y += 14;
-  snprintf(t, sizeof(t), "Llamadas video: %d  formato pixel: %d", g_vc, g_pf);
-  texto(10, y, t);
-  y += 14;
   int ini = nlog > 16 ? nlog - 16 : 0;
   for (int i = ini; i < nlog; i++) {
     snprintf(t, sizeof(t), "LOG: %.120s", logbuf[i % 16]);
@@ -379,7 +360,7 @@ static void dibujar_juego(void) {
   }
   SDL_RenderSetScale(R, 2, 2);
   char t[160];
-  snprintf(t, sizeof(t), "F:%d  ms:%d  %ux%u  px:%d", g_frames, g_ms, g_vw, g_vh, g_vnz);
+  snprintf(t, sizeof(t), "F:%d run:%d dib:%d ms  %ux%u", g_frames, g_run_ms, g_dib_ms, g_vw, g_vh);
   texto(5, 5, t);
   SDL_RenderPresent(R);
 }
@@ -470,21 +451,28 @@ int main(void) {
   paso("4) load_game OK; mostrando imagen...");
   esp("INICIO frames (sin limite)");
   g_jugando = 1;
-  unsigned t0 = SDL_GetTicks();
-  unsigned tv = t0;
+  unsigned acc_run = 0, acc_dib = 0;
   int i = 0;
   for (;;) {
-    if (i < 5 || i % 60 == 0) esp("frame %d ini t=%u", i + 1, SDL_GetTicks() - t0);
+    unsigned a = SDL_GetTicks();
     retro_run();
+    unsigned b = SDL_GetTicks();
     i++;
     g_frames = i;
-    if (i % 60 == 0) {
-      unsigned ahora = SDL_GetTicks();
-      g_ms = (int)((ahora - tv) / 60);
-      tv = ahora;
+    if (i % 2 == 0) {
+      SDL_PumpEvents();
+      dibujar_juego();
     }
-    SDL_PumpEvents();
-    dibujar_juego();
+    unsigned c = SDL_GetTicks();
+    acc_run += b - a;
+    acc_dib += c - b;
+    if (i % 60 == 0) {
+      g_run_ms = (int)(acc_run / 60);
+      g_dib_ms = (int)(acc_dib / 60);
+      esp("frame %d run=%d dib=%d", i, g_run_ms, g_dib_ms);
+      acc_run = 0;
+      acc_dib = 0;
+    }
   }
   return 0;
 }
