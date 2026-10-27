@@ -244,19 +244,17 @@ static bool entorno(unsigned cmd, void *data) {
     case 11: return true;
     case 15: {
       retro_variable *v = (retro_variable *)data;
-      esp("ENV15 clave=%s", v->key ? v->key : "(null)");
+      if (!g_traza) esp("ENV15 clave=%s", v->key ? v->key : "(null)");
       if (contiene(v->key, "fastmem")) {
         v->value = "Disabled";
         return true;
       }
       if (contiene(v->key, "GPU_Renderer")) {
         v->value = "Software";
-        esp("  -> respondido Software");
         return true;
       }
       if (g_interp && contiene(v->key, "executionmode")) {
         v->value = "Interpreter";
-        esp("  -> respondido Interpreter");
         return true;
       }
       v->value = NULL;
@@ -267,16 +265,17 @@ static bool entorno(unsigned cmd, void *data) {
     case 27: ((retro_log_callback *)data)->log = log_core; return true;
     case 31: *(const char **)data = "/data/swan"; return true;
     default:
-      if (g_traza) esp("ENV cmd=%u rechazado", cmd);
       return false;
   }
 }
 
 static void video(const void *d, unsigned w, unsigned h, size_t p) {
+  if (g_vc < 3 || w != g_vw || h != g_vh) {
+    esp("VIDEO llamada %d: %ux%u pitch=%llu datos=%p", g_vc + 1, w, h, (unsigned long long)p, d);
+  }
   g_vw = w;
   g_vh = h;
   g_vc++;
-  if (g_vc <= 3) esp("VIDEO llamada %d: %ux%u pitch=%llu datos=%p", g_vc, w, h, (unsigned long long)p, d);
   if (d && d != (const void *)-1) {
     const unsigned char *b = (const unsigned char *)d;
     size_t n = (size_t)h * p;
@@ -414,24 +413,25 @@ int main(void) {
   esp("INICIO retro_load_game");
   g_traza = 1;
   bool ok = retro_load_game(&gi);
-  g_traza = 0;
   esp("FIN retro_load_game = %d", ok ? 1 : 0);
   if (!ok) {
+    g_traza = 0;
     paso("3) load_game DEVOLVIO FALSE");
     esperar(1800);
     SDL_Quit();
     return 0;
   }
   paso("4) load_game OK; ejecutando 600 frames...");
-  esp("INICIO frames");
+  esp("INICIO frames (espia sigue activo)");
   unsigned t0 = SDL_GetTicks();
   for (int i = 0; i < 600; i++) {
+    esp("frame %d ini t=%u", i + 1, SDL_GetTicks() - t0);
     retro_run();
     g_frames = i + 1;
     g_ms = (int)((SDL_GetTicks() - t0) / (unsigned)(i + 1));
-    if (i < 3) esp("frame %d OK", i + 1);
     dibujar();
   }
+  g_traza = 0;
   esp("FIN 600 frames");
   paso("5) 600 frames terminados");
   esperar(1800);
