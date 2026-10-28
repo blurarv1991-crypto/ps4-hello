@@ -13,9 +13,15 @@
 extern "C" {
 #include <orbis/UserService.h>
 #include <orbis/Pad.h>
-#include <orbis/AudioOut.h>
 }
 #include "stb_easy_font.h"
+
+/* Audio: declaraciones propias enlazadas a los simbolos reales de la PS4 */
+extern "C" {
+int mia_aud_init(void) __asm__("sceAudioOutInit");
+int mia_aud_open(int uid, int tipo, int indice, unsigned len, unsigned freq, unsigned param) __asm__("sceAudioOutOpen");
+int mia_aud_out(int handle, const void *datos) __asm__("sceAudioOutOutput");
+}
 
 typedef OrbisPadData ScePadData;
 
@@ -431,7 +437,7 @@ static void audio_enviar(void) {
       grano[i * 2 + 1] = g_aq[k * 2 + 1];
     }
     g_ah += GRANO;
-    int r = sceAudioOutOutput(g_aud, grano);
+    int r = mia_aud_out(g_aud, grano);
     if (r < 0 && !g_aout_ok) {
       esp("AUDIO output error %x", (unsigned)r);
       g_aout_ok = -1;
@@ -657,8 +663,8 @@ int main(void) {
 
   /* Audio: puerto principal, 256 muestras por bloque, 48000 Hz, S16 estereo.
      Suposicion: tipo 0 = MAIN y formato 1 = S16_STEREO */
-  int ra = sceAudioOutInit();
-  g_aud = sceAudioOutOpen(uid, 0, 0, GRANO, 48000, 1);
+  int ra = mia_aud_init();
+  g_aud = mia_aud_open((int)uid, 0, 0, GRANO, 48000, 1);
   esp("AUDIO init=%d open handle=%d (uid=%d)", ra, g_aud, (int)uid);
 
   struct retro_system_info info;
