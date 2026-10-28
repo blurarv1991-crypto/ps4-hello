@@ -29,7 +29,7 @@ typedef OrbisPadData ScePadData;
 #define SHM_ANON ((char *)1)
 #endif
 
-/* Mascaras de botones de ScePad (verificados: L3, R3, UP, CIRCLE, CROSS) */
+/* Mascaras de botones de ScePad (todas verificadas en la PS4; SHARE = 0x800000 no se usa) */
 #define PB_L3 0x00000002u
 #define PB_R3 0x00000004u
 #define PB_OPTIONS 0x00000008u
@@ -822,8 +822,8 @@ int main(void) {
     g_hilo_ok = th ? 1 : 0;
     esp("AUDIO hilo %s", g_hilo_ok ? "creado" : "NO se pudo crear (audio en el bucle principal)");
   }
-  /* El hilo de dibujo es opcional: solo si existe /data/swan/hilo_dibujo.txt */
-  int quiere_hilo = existe("/data/swan/hilo_dibujo.txt") ? 1 : 0;
+  /* El hilo de dibujo se usa siempre, salvo que exista /data/swan/sin_hilo.txt */
+  int quiere_hilo = existe("/data/swan/sin_hilo.txt") ? 0 : 1;
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
     SDL_Thread *td = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
