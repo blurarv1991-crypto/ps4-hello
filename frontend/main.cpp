@@ -664,8 +664,12 @@ int main(void) {
   /* Audio: puerto principal, 256 muestras por bloque, 48000 Hz, S16 estereo.
      Suposicion: tipo 0 = MAIN y formato 1 = S16_STEREO */
   int ra = mia_aud_init();
-  g_aud = mia_aud_open((int)uid, 0, 0, GRANO, 48000, 1);
-  esp("AUDIO init=%d open handle=%d (uid=%d)", ra, g_aud, (int)uid);
+  int ids[3] = {0xFF, (int)uid, 0};
+  for (int k = 0; k < 3; k++) {
+    g_aud = mia_aud_open(ids[k], 0, 0, GRANO, 48000, 1);
+    esp("AUDIO init=%d open(uid=%d) -> %d (0x%x)", ra, ids[k], g_aud, (unsigned)g_aud);
+    if (g_aud >= 0) break;
+  }
 
   struct retro_system_info info;
   memset(&info, 0, sizeof(info));
