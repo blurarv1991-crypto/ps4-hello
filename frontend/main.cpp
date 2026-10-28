@@ -179,7 +179,7 @@ static unsigned g_mask = 0;
 static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
 static int g_modo = 3;
-static int g_cada = 2;
+static int g_cada = 3;
 
 /* audio */
 #define AQ_N 32768
@@ -685,13 +685,21 @@ static int tomar_cuadro(void) {
 /* Hilo de dibujo: cuando hay un cuadro listo lo escala, lo sube y hace Present */
 static int hilo_dibujo(void *arg) {
   (void)arg;
+  esp("DIBUJO hilo: arranca");
+  int primero = 1;
   for (;;) {
     if (__atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 1) {
       __atomic_store_n(&g_dib_estado, 2, __ATOMIC_RELAXED);
+      if (primero) esp("DIBUJO hilo: primer cuadro, empieza");
       dibujar_juego();
+      if (primero) {
+        esp("DIBUJO hilo: primer cuadro, terminado");
+        primero = 0;
+      }
       __atomic_store_n(&g_dib_estado, 0, __ATOMIC_RELEASE);
     } else {
-      SDL_Delay(1);
+      /* espera sin llamar a ninguna libreria (por si fallan en este hilo) */
+      __builtin_ia32_pause();
     }
   }
   return 0;
@@ -814,11 +822,15 @@ int main(void) {
     g_hilo_ok = th ? 1 : 0;
     esp("AUDIO hilo %s", g_hilo_ok ? "creado" : "NO se pudo crear (audio en el bucle principal)");
   }
-  if (g_pf == 2 || g_pf == 0) {
+  /* El hilo de dibujo es opcional: solo si existe /data/swan/hilo_dibujo.txt */
+  int quiere_hilo = existe("/data/swan/hilo_dibujo.txt") ? 1 : 0;
+  esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
+  if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
     SDL_Thread *td = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
     g_dib_hilo = td ? 1 : 0;
     esp("DIBUJO hilo %s", g_dib_hilo ? "creado" : "NO se pudo crear (dibujo en el bucle principal)");
   }
+  g_cada = g_dib_hilo ? 2 : 3;
   for (;;) {
     double a = ahora_us();
     retro_run();
