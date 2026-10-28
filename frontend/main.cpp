@@ -157,6 +157,7 @@ static volatile int g_traza = 0;
 static volatile int g_dentro = 0;
 static int g_fd = -1;
 static int g_interp = 0;
+static int g_cached = 0;
 static int g_jugando = 0;
 static char g_rend[40] = "?";
 static int g_kreal = 1;
@@ -356,6 +357,10 @@ static bool entorno(unsigned cmd, void *data) {
       }
       if (contiene(v->key, "ReadaheadSectors")) {
         v->value = "0";
+        return true;
+      }
+      if (g_cached && contiene(v->key, "executionmode")) {
+        v->value = "CachedInterpreter";
         return true;
       }
       if (g_interp && contiene(v->key, "executionmode")) {
@@ -714,8 +719,9 @@ int main(void) {
   mkdir("/data/swan", 0777);
 
   g_interp = existe("/data/swan/interp.txt") ? 1 : 0;
+  g_cached = existe("/data/swan/cached.txt") ? 1 : 0;
   g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  esp("ARRANQUE interp=%d", g_interp);
+  esp("ARRANQUE interp=%d cached=%d", g_interp, g_cached);
 
   SDL_RendererInfo ri;
   memset(&ri, 0, sizeof(ri));
