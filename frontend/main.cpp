@@ -167,13 +167,19 @@ static unsigned g_dw = 0, g_dh = 0;
 static size_t g_dpitch = 0;
 static uint16_t g_sbuf[1920 * 1080];
 
+/* copia del ultimo cuadro, para dibujarlo en otro hilo */
+static uint16_t g_snap[1920 * 1080];
+static unsigned g_sw = 0, g_sh = 0;
+static int g_dib_estado = 0; /* 0 libre, 1 cuadro listo, 2 dibujando */
+static int g_dib_hilo = 0;
+
 /* mando */
 static int g_pad = -1;
 static unsigned g_mask = 0;
 static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
 static int g_modo = 3;
-static int g_cada = 3;
+static int g_cada = 2;
 
 /* audio */
 #define AQ_N 32768
@@ -381,23 +387,6 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
   g_dw = w;
   g_dh = h;
   g_dpitch = p;
-
-  if (!g_tex || g_tw != (int)w || g_th != (int)h) {
-    if (g_tex) SDL_DestroyTexture(g_tex);
-    Uint32 fmt = SDL_PIXELFORMAT_RGB565;
-    if (g_pf == 0) fmt = SDL_PIXELFORMAT_ARGB1555;
-    if (g_pf == 1) fmt = SDL_PIXELFORMAT_RGB888;
-    g_tex = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, (int)w, (int)h);
-    g_tw = (int)w;
-    g_th = (int)h;
-    esp("TEXTURA %dx%d fmt=%d ptr=%p", g_tw, g_th, g_pf, (void *)g_tex);
-  }
-  if (g_tex && g_modo == 0) {
-    double t0 = ahora_us();
-    SDL_UpdateTexture(g_tex, NULL, d, (int)p);
-    a_upd += ahora_us() - t0;
-    n_upd++;
-  }
 }
 
 /* ---- audio: remuestreo lineal a 48000 Hz y cola circular ---- */
@@ -579,9 +568,9 @@ static void dibujar(void) {
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
-  if (!g_dp || g_dw == 0 || g_dh == 0) return 0;
+  if (g_sw == 0 || g_sh == 0) return 0;
   if (g_pf != 2 && g_pf != 0) return 0;
-  int w = (int)g_dw, h = (int)g_dh;
+  int w = (int)g_sw, h = (int)g_sh;
   int kmax = 1920 / w;
   int k2 = 1080 / h;
   if (k2 < kmax) kmax = k2;
@@ -589,9 +578,8 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   int k = (kpedido <= 0 || kpedido > kmax) ? kmax : kpedido;
   g_kreal = k;
   int W = w * k, H = h * k;
-  const unsigned char *src = (const unsigned char *)g_dp;
   for (int y = 0; y < h; y++) {
-    const uint16_t *s = (const uint16_t *)(src + (size_t)y * g_dpitch);
+    const uint16_t *s = g_snap + (size_t)y * (size_t)w;
     uint16_t *d = g_sbuf + (size_t)(y * k) * W;
     for (int x = 0; x < w; x++) {
       uint16_t v = s[x];
@@ -621,6 +609,22 @@ static void dibujar_juego(void) {
   SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
   int hecho = 0;
+  if (g_modo == 0 && g_sw > 0 && g_sh > 0) {
+    if (!g_tex || g_tw != (int)g_sw || g_th != (int)g_sh) {
+      if (g_tex) SDL_DestroyTexture(g_tex);
+      Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
+      g_tex = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, (int)g_sw, (int)g_sh);
+      g_tw = (int)g_sw;
+      g_th = (int)g_sh;
+      esp("TEXTURA %dx%d fmt=%d ptr=%p", g_tw, g_th, g_pf, (void *)g_tex);
+    }
+    if (g_tex) {
+      double tu = ahora_us();
+      SDL_UpdateTexture(g_tex, NULL, g_snap, (int)g_sw * 2);
+      a_upd += ahora_us() - tu;
+      n_upd++;
+    }
+  }
   double te0 = ahora_us();
   if (g_modo >= 1) {
     int kp = (g_modo == 1) ? 2 : (g_modo == 2 ? 3 : 0);
@@ -662,6 +666,35 @@ static void paso(const char *s) {
   snprintf(lineas[nl], sizeof(lineas[0]), "%.90s", s);
   if (nl < 23) nl++;
   esperar(60);
+}
+
+/* Copia el ultimo cuadro del nucleo a g_snap (solo 16 bits por pixel) */
+static int tomar_cuadro(void) {
+  if (!g_dp || g_dw == 0 || g_dh == 0) return 0;
+  if (g_pf != 2 && g_pf != 0) return 0;
+  if ((size_t)g_dw * (size_t)g_dh > (size_t)(1920 * 1080)) return 0;
+  const unsigned char *src = (const unsigned char *)g_dp;
+  for (unsigned y = 0; y < g_dh; y++) {
+    memcpy(g_snap + (size_t)y * g_dw, src + (size_t)y * g_dpitch, (size_t)g_dw * 2);
+  }
+  g_sw = g_dw;
+  g_sh = g_dh;
+  return 1;
+}
+
+/* Hilo de dibujo: cuando hay un cuadro listo lo escala, lo sube y hace Present */
+static int hilo_dibujo(void *arg) {
+  (void)arg;
+  for (;;) {
+    if (__atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 1) {
+      __atomic_store_n(&g_dib_estado, 2, __ATOMIC_RELAXED);
+      dibujar_juego();
+      __atomic_store_n(&g_dib_estado, 0, __ATOMIC_RELEASE);
+    } else {
+      SDL_Delay(1);
+    }
+  }
+  return 0;
 }
 
 int main(void) {
@@ -781,6 +814,11 @@ int main(void) {
     g_hilo_ok = th ? 1 : 0;
     esp("AUDIO hilo %s", g_hilo_ok ? "creado" : "NO se pudo crear (audio en el bucle principal)");
   }
+  if (g_pf == 2 || g_pf == 0) {
+    SDL_Thread *td = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
+    g_dib_hilo = td ? 1 : 0;
+    esp("DIBUJO hilo %s", g_dib_hilo ? "creado" : "NO se pudo crear (dibujo en el bucle principal)");
+  }
   for (;;) {
     double a = ahora_us();
     retro_run();
@@ -790,7 +828,12 @@ int main(void) {
     g_frames = i;
     if (i % g_cada == 0) {
       SDL_PumpEvents();
-      dibujar_juego();
+      if (g_dib_hilo) {
+        if (__atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 0 && tomar_cuadro())
+          __atomic_store_n(&g_dib_estado, 1, __ATOMIC_RELEASE);
+      } else if (tomar_cuadro()) {
+        dibujar_juego();
+      }
     }
     /* Ritmo: el audio marca el reloj. Si hay mas de ~50 ms acumulados, se espera
        (tope 40 ms por frame, por si el hilo de audio se atasca). */
@@ -820,7 +863,7 @@ int main(void) {
       unsigned dsil = hs - hs_prev;
       hb_prev = hb;
       hs_prev = hs;
-      esp("frame %d run=%d cop=%d pre=%d esc=%d aud=%d blq=%u sil=%u tot=%d k=%d cada=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_cop, m_pre, m_esc, m_aud, dblq, dsil, m_tot, g_kreal, g_cada, g_aud, m_ain, g_at - g_ah, g_aout_ok);
+      esp("frame %d run=%d cop=%d pre=%d esc=%d dib=%d blq=%u sil=%u tot=%d k=%d cada=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_cop, m_pre, m_esc, n_dib, dblq, dsil, m_tot, g_kreal, g_cada, g_aud, m_ain, g_at - g_ah, g_aout_ok);
       a_aud = 0;
       n_blq = 0;
       a_run = a_upd = a_cop = a_pre = a_esc = 0;
