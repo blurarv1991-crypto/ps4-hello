@@ -792,6 +792,16 @@ int main(void) {
       SDL_PumpEvents();
       dibujar_juego();
     }
+    /* Ritmo: el audio marca el reloj. Si hay mas de ~50 ms acumulados, se espera
+       (tope 40 ms por frame, por si el hilo de audio se atasca). */
+    if (g_hilo_ok) {
+      int esperas = 0;
+      while (esperas < 40 &&
+             (__atomic_load_n(&g_at, __ATOMIC_ACQUIRE) - __atomic_load_n(&g_ah, __ATOMIC_ACQUIRE)) > GRANO * 10) {
+        SDL_Delay(1);
+        esperas++;
+      }
+    }
     if (i % 60 == 0) {
       unsigned ahora = SDL_GetTicks();
       unsigned dt = ahora - t_prev;
