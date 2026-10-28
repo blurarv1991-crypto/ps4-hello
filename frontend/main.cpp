@@ -196,6 +196,8 @@ static int m_run = 0, m_upd = 0, m_cop = 0, m_pre = 0, m_esc = 0;
 static double a_aud = 0;
 static int n_blq = 0;
 static int m_aud = 0, m_tot = 0;
+static int g_hilo_ok = 0;
+static unsigned g_hblq = 0, g_hsil = 0;
 
 static double ahora_us(void) {
   return (double)SDL_GetPerformanceCounter() * 1000000.0 / (double)SDL_GetPerformanceFrequency();
@@ -400,11 +402,13 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
 
 /* ---- audio: remuestreo lineal a 48000 Hz y cola circular ---- */
 static void aq_push(int16_t l, int16_t r) {
-  if (g_at - g_ah >= AQ_N) return; /* cola llena: se descarta */
-  unsigned i = g_at & AQ_MASK;
+  unsigned ah = __atomic_load_n(&g_ah, __ATOMIC_ACQUIRE);
+  unsigned at = g_at;
+  if (at - ah >= AQ_N) return; /* cola llena: se descarta */
+  unsigned i = at & AQ_MASK;
   g_aq[i * 2] = l;
   g_aq[i * 2 + 1] = r;
-  g_at++;
+  __atomic_store_n(&g_at, at + 1, __ATOMIC_RELEASE);
 }
 
 static void audio_entrada(int16_t l, int16_t r) {
@@ -453,6 +457,39 @@ static void audio_enviar(void) {
     }
     veces++;
   }
+}
+
+/* Hilo de audio: lee la cola circular y llama a sceAudioOutOutput (que bloquea).
+   Si falta audio manda un bloque de silencio para mantener el ritmo. */
+static int hilo_audio(void *arg) {
+  (void)arg;
+  static int16_t grano[GRANO * 2];
+  for (;;) {
+    unsigned at = __atomic_load_n(&g_at, __ATOMIC_ACQUIRE);
+    unsigned ah = g_ah;
+    int hay = (at - ah >= GRANO);
+    if (hay) {
+      for (int i = 0; i < GRANO; i++) {
+        unsigned k = (ah + (unsigned)i) & AQ_MASK;
+        grano[i * 2] = g_aq[k * 2];
+        grano[i * 2 + 1] = g_aq[k * 2 + 1];
+      }
+      __atomic_store_n(&g_ah, ah + GRANO, __ATOMIC_RELEASE);
+    } else {
+      memset(grano, 0, sizeof(grano));
+    }
+    int r = mia_aud_out(g_aud, grano);
+    if (hay) __atomic_fetch_add(&g_hblq, 1u, __ATOMIC_RELAXED);
+    else __atomic_fetch_add(&g_hsil, 1u, __ATOMIC_RELAXED);
+    if (r < 0 && !g_aout_ok) {
+      esp("AUDIO hilo output error %x", (unsigned)r);
+      g_aout_ok = -1;
+    } else if (r >= 0 && g_aout_ok == 0) {
+      g_aout_ok = 1;
+      esp("AUDIO hilo primer envio OK (ret=%d)", r);
+    }
+  }
+  return 0;
 }
 
 /* Lee el mando y arma la mascara de botones de libretro */
@@ -738,11 +775,17 @@ int main(void) {
   int i = 0;
   unsigned long long ain_prev = 0;
   unsigned t_prev = SDL_GetTicks();
+  unsigned hb_prev = 0, hs_prev = 0;
+  if (g_aud >= 0) {
+    SDL_Thread *th = SDL_CreateThread(hilo_audio, "audio", NULL);
+    g_hilo_ok = th ? 1 : 0;
+    esp("AUDIO hilo %s", g_hilo_ok ? "creado" : "NO se pudo crear (audio en el bucle principal)");
+  }
   for (;;) {
     double a = ahora_us();
     retro_run();
     a_run += ahora_us() - a;
-    audio_enviar();
+    if (!g_hilo_ok) audio_enviar();
     i++;
     g_frames = i;
     if (i % g_cada == 0) {
@@ -762,7 +805,12 @@ int main(void) {
       m_esc = n_dib ? (int)(a_esc / n_dib / 100.0) : 0;
       m_aud = (int)(a_aud / 60.0 / 100.0);
       m_tot = (int)(dt * 10u / 60u);
-      esp("frame %d run=%d cop=%d pre=%d esc=%d aud=%d blq=%d tot=%d k=%d cada=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_cop, m_pre, m_esc, m_aud, n_blq, m_tot, g_kreal, g_cada, g_aud, m_ain, g_at - g_ah, g_aout_ok);
+      unsigned hb = g_hblq, hs = g_hsil;
+      unsigned dblq = g_hilo_ok ? (hb - hb_prev) : (unsigned)n_blq;
+      unsigned dsil = hs - hs_prev;
+      hb_prev = hb;
+      hs_prev = hs;
+      esp("frame %d run=%d cop=%d pre=%d esc=%d aud=%d blq=%u sil=%u tot=%d k=%d cada=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_cop, m_pre, m_esc, m_aud, dblq, dsil, m_tot, g_kreal, g_cada, g_aud, m_ain, g_at - g_ah, g_aout_ok);
       a_aud = 0;
       n_blq = 0;
       a_run = a_upd = a_cop = a_pre = a_esc = 0;
