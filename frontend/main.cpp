@@ -193,6 +193,9 @@ static int g_aout_ok = 0;
 static double a_run = 0, a_upd = 0, a_cop = 0, a_pre = 0, a_esc = 0;
 static int n_upd = 0, n_dib = 0;
 static int m_run = 0, m_upd = 0, m_cop = 0, m_pre = 0, m_esc = 0;
+static double a_aud = 0;
+static int n_blq = 0;
+static int m_aud = 0, m_tot = 0;
 
 static double ahora_us(void) {
   return (double)SDL_GetPerformanceCounter() * 1000000.0 / (double)SDL_GetPerformanceFrequency();
@@ -437,7 +440,10 @@ static void audio_enviar(void) {
       grano[i * 2 + 1] = g_aq[k * 2 + 1];
     }
     g_ah += GRANO;
+    double ta = ahora_us();
     int r = mia_aud_out(g_aud, grano);
+    a_aud += ahora_us() - ta;
+    n_blq++;
     if (r < 0 && !g_aout_ok) {
       esp("AUDIO output error %x", (unsigned)r);
       g_aout_ok = -1;
@@ -754,7 +760,11 @@ int main(void) {
       m_cop = n_dib ? (int)(a_cop / n_dib / 100.0) : 0;
       m_pre = n_dib ? (int)(a_pre / n_dib / 100.0) : 0;
       m_esc = n_dib ? (int)(a_esc / n_dib / 100.0) : 0;
-      esp("frame %d run=%d pre=%d esc=%d k=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_pre, m_esc, g_kreal, g_aud, m_ain, g_at - g_ah, g_aout_ok);
+      m_aud = (int)(a_aud / 60.0 / 100.0);
+      m_tot = (int)(dt * 10u / 60u);
+      esp("frame %d run=%d cop=%d pre=%d esc=%d aud=%d blq=%d tot=%d k=%d cada=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_cop, m_pre, m_esc, m_aud, n_blq, m_tot, g_kreal, g_cada, g_aud, m_ain, g_at - g_ah, g_aout_ok);
+      a_aud = 0;
+      n_blq = 0;
       a_run = a_upd = a_cop = a_pre = a_esc = 0;
       n_upd = n_dib = 0;
     }
