@@ -13,6 +13,7 @@
 extern "C" {
 #include <orbis/UserService.h>
 #include <orbis/Pad.h>
+#include <orbis/AudioOut.h>
 }
 #include "stb_easy_font.h"
 
@@ -22,7 +23,7 @@ typedef OrbisPadData ScePadData;
 #define SHM_ANON ((char *)1)
 #endif
 
-/* Mascaras de botones de ScePad (L3 y R3 verificados en la PS4) */
+/* Mascaras de botones de ScePad (verificados: L3, R3, UP, CIRCLE, CROSS) */
 #define PB_L3 0x00000002u
 #define PB_R3 0x00000004u
 #define PB_OPTIONS 0x00000008u
@@ -107,8 +108,18 @@ struct retro_game_info {
   size_t size;
   const char *meta;
 };
+struct retro_system_av_info {
+  unsigned base_width;
+  unsigned base_height;
+  unsigned max_width;
+  unsigned max_height;
+  float aspect_ratio;
+  double fps;
+  double sample_rate;
+};
 unsigned retro_api_version(void);
 void retro_get_system_info(struct retro_system_info *info);
+void retro_get_system_av_info(struct retro_system_av_info *info);
 void retro_set_environment(bool (*cb)(unsigned, void *));
 void retro_set_video_refresh(void (*cb)(const void *, unsigned, unsigned, size_t));
 void retro_set_audio_sample(void (*cb)(int16_t, int16_t));
@@ -155,8 +166,22 @@ static int g_pad = -1;
 static unsigned g_mask = 0;
 static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
-static int g_modo = 1;
+static int g_modo = 3;
 static int g_cada = 3;
+
+/* audio */
+#define AQ_N 32768
+#define AQ_MASK (AQ_N - 1)
+#define GRANO 256
+static int g_aud = -1;
+static double g_srate = 44100.0;
+static int16_t g_aq[AQ_N * 2];
+static unsigned g_ah = 0, g_at = 0;
+static double g_rpos = 0.0;
+static int16_t g_pl = 0, g_pr = 0;
+static unsigned long long g_ain = 0;
+static int m_ain = 0;
+static int g_aout_ok = 0;
 
 /* tiempos en microsegundos (acumulados) y medias en decimas de ms */
 static double a_run = 0, a_upd = 0, a_cop = 0, a_pre = 0, a_esc = 0;
@@ -363,8 +388,60 @@ static void video(const void *d, unsigned w, unsigned h, size_t p) {
     n_upd++;
   }
 }
-static void audio1(int16_t l, int16_t r) { (void)l; (void)r; }
-static size_t audio2(const int16_t *d, size_t n) { (void)d; return n; }
+
+/* ---- audio: remuestreo lineal a 48000 Hz y cola circular ---- */
+static void aq_push(int16_t l, int16_t r) {
+  if (g_at - g_ah >= AQ_N) return; /* cola llena: se descarta */
+  unsigned i = g_at & AQ_MASK;
+  g_aq[i * 2] = l;
+  g_aq[i * 2 + 1] = r;
+  g_at++;
+}
+
+static void audio_entrada(int16_t l, int16_t r) {
+  g_ain++;
+  double paso = g_srate / 48000.0;
+  while (g_rpos < 1.0) {
+    double a = g_rpos;
+    int16_t ol = (int16_t)(g_pl + (l - g_pl) * a);
+    int16_t orr = (int16_t)(g_pr + (r - g_pr) * a);
+    aq_push(ol, orr);
+    g_rpos += paso;
+  }
+  g_rpos -= 1.0;
+  g_pl = l;
+  g_pr = r;
+}
+
+static void audio1(int16_t l, int16_t r) { audio_entrada(l, r); }
+static size_t audio2(const int16_t *d, size_t n) {
+  for (size_t i = 0; i < n; i++) audio_entrada(d[i * 2], d[i * 2 + 1]);
+  return n;
+}
+
+/* Envia a la PS4 los bloques completos que haya en la cola */
+static void audio_enviar(void) {
+  if (g_aud < 0) return;
+  int veces = 0;
+  static int16_t grano[GRANO * 2];
+  while (g_at - g_ah >= GRANO && veces < 8) {
+    for (int i = 0; i < GRANO; i++) {
+      unsigned k = (g_ah + (unsigned)i) & AQ_MASK;
+      grano[i * 2] = g_aq[k * 2];
+      grano[i * 2 + 1] = g_aq[k * 2 + 1];
+    }
+    g_ah += GRANO;
+    int r = sceAudioOutOutput(g_aud, grano);
+    if (r < 0 && !g_aout_ok) {
+      esp("AUDIO output error %x", (unsigned)r);
+      g_aout_ok = -1;
+    } else if (r >= 0 && g_aout_ok == 0) {
+      g_aout_ok = 1;
+      esp("AUDIO output primer envio OK (ret=%d)", r);
+    }
+    veces++;
+  }
+}
 
 /* Lee el mando y arma la mascara de botones de libretro */
 static void poll(void) {
@@ -513,9 +590,9 @@ static void dibujar_juego(void) {
   }
   double t1 = ahora_us();
   SDL_RenderSetScale(R, 2, 2);
-  char t[220];
-  snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d esc:%d.%d modo:%d k:%d cada:%d pad:%x %ux%u", g_frames,
-           m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, m_esc / 10, m_esc % 10, g_modo, g_kreal, g_cada, (unsigned)g_btn, g_vw, g_vh);
+  char t[240];
+  snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d k:%d pad:%x au:%d in/s:%d q:%u", g_frames,
+           m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, g_kreal, (unsigned)g_btn, g_aud, m_ain, g_at - g_ah);
   texto(5, 5, t);
   double t2 = ahora_us();
   SDL_RenderPresent(R);
@@ -578,13 +655,19 @@ int main(void) {
   g_pad = scePadOpen(uid, 0, 0, NULL);
   esp("PAD userinit=%d getuser=%d uid=%d padinit=%d handle=%d", ru, rg, (int)uid, rp, g_pad);
 
+  /* Audio: puerto principal, 256 muestras por bloque, 48000 Hz, S16 estereo.
+     Suposicion: tipo 0 = MAIN y formato 1 = S16_STEREO */
+  int ra = sceAudioOutInit();
+  g_aud = sceAudioOutOpen(uid, 0, 0, GRANO, 48000, 1);
+  esp("AUDIO init=%d open handle=%d (uid=%d)", ra, g_aud, (int)uid);
+
   struct retro_system_info info;
   memset(&info, 0, sizeof(info));
   retro_get_system_info(&info);
   char t[160];
   snprintf(t, sizeof(t), "%s %s API %u", info.library_name ? info.library_name : "?", info.library_version ? info.library_version : "?", retro_api_version());
   paso(t);
-  snprintf(t, sizeof(t), "fd=%d interp=%d pad=%d rend=%s", g_fd, g_interp, g_pad, g_rend);
+  snprintf(t, sizeof(t), "fd=%d interp=%d pad=%d audio=%d rend=%s", g_fd, g_interp, g_pad, g_aud, g_rend);
   paso(t);
 
   retro_set_environment(entorno);
@@ -626,14 +709,24 @@ int main(void) {
     SDL_Quit();
     return 0;
   }
+
+  struct retro_system_av_info av;
+  memset(&av, 0, sizeof(av));
+  retro_get_system_av_info(&av);
+  if (av.sample_rate > 8000.0 && av.sample_rate < 96000.0) g_srate = av.sample_rate;
+  esp("AV fps=%.2f sample_rate=%.1f base=%ux%u", av.fps, av.sample_rate, av.base_width, av.base_height);
+
   paso("4) load_game OK; mostrando imagen...");
   esp("INICIO frames (sin limite)");
   g_jugando = 1;
   int i = 0;
+  unsigned long long ain_prev = 0;
+  unsigned t_prev = SDL_GetTicks();
   for (;;) {
     double a = ahora_us();
     retro_run();
     a_run += ahora_us() - a;
+    audio_enviar();
     i++;
     g_frames = i;
     if (i % g_cada == 0) {
@@ -641,12 +734,17 @@ int main(void) {
       dibujar_juego();
     }
     if (i % 60 == 0) {
+      unsigned ahora = SDL_GetTicks();
+      unsigned dt = ahora - t_prev;
+      if (dt > 0) m_ain = (int)((g_ain - ain_prev) * 1000ULL / dt);
+      ain_prev = g_ain;
+      t_prev = ahora;
       m_run = (int)(a_run / 60.0 / 100.0);
       m_upd = n_upd ? (int)(a_upd / n_upd / 100.0) : 0;
       m_cop = n_dib ? (int)(a_cop / n_dib / 100.0) : 0;
       m_pre = n_dib ? (int)(a_pre / n_dib / 100.0) : 0;
       m_esc = n_dib ? (int)(a_esc / n_dib / 100.0) : 0;
-      esp("frame %d run=%d pre=%d esc=%d modo=%d k=%d cada=%d pad=%x", i, m_run, m_pre, m_esc, g_modo, g_kreal, g_cada, (unsigned)g_btn);
+      esp("frame %d run=%d pre=%d esc=%d k=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_pre, m_esc, g_kreal, g_aud, m_ain, g_at - g_ah, g_aout_ok);
       a_run = a_upd = a_cop = a_pre = a_esc = 0;
       n_upd = n_dib = 0;
     }
