@@ -187,6 +187,10 @@ static unsigned g_mask = 0;
 static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
 static int g_modo = 3;
+static int g_asp = 1; /* 1 = corregir a 4:3, 0 = pixeles cuadrados (Share cambia) */
+static int g_xmap[1920];
+static int g_xmap_w = 0, g_xmap_W = 0;
+#define PB_SHARE 0x00800000u
 static int g_cada = 3;
 
 /* audio */
@@ -530,6 +534,7 @@ static void poll(void) {
   /* L3 cambia la escala, R3 cambia cada cuantos frames se dibuja */
   uint32_t nuevos = b & ~g_btn_prev;
   if (nuevos & PB_L3) g_modo = (g_modo + 1) % 4;
+  if (nuevos & PB_SHARE) g_asp = !g_asp;
   if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
   g_btn_prev = b;
 }
@@ -590,18 +595,37 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   int w = (int)g_sw, h = (int)g_sh;
   int kmax = 1920 / w;
   int k2 = 1080 / h;
-  if (k2 < kmax) kmax = k2;
+  if (k2 < kmax && !g_asp) kmax = k2;
+  if (g_asp) kmax = k2;
   if (kmax < 1) kmax = 1;
   int k = (kpedido <= 0 || kpedido > kmax) ? kmax : kpedido;
   g_kreal = k;
-  int W = w * k, H = h * k;
+  int H = h * k;
+  int W = w * k;
+  int asp = 0;
+  if (g_asp) {
+    int Wa = (H * 4 + 1) / 3;
+    if (Wa >= w && Wa <= 1920) { W = Wa; asp = 1; }
+  }
+  if (!asp) {
+    /* pixeles cuadrados: factor entero igual en ancho y alto */
+    int kk = 1920 / w;
+    if (1080 / h < kk) kk = 1080 / h;
+    if (kk < 1) kk = 1;
+    if (k > kk) k = kk;
+    g_kreal = k;
+    W = w * k;
+    H = h * k;
+  }
+  if (g_xmap_w != w || g_xmap_W != W) {
+    for (int x = 0; x < W; x++) g_xmap[x] = (int)(((long long)x * w) / W);
+    g_xmap_w = w;
+    g_xmap_W = W;
+  }
   for (int y = 0; y < h; y++) {
     const uint16_t *s = g_snap + (size_t)y * (size_t)w;
     uint16_t *d = g_sbuf + (size_t)(y * k) * W;
-    for (int x = 0; x < w; x++) {
-      uint16_t v = s[x];
-      for (int j = 0; j < k; j++) d[x * k + j] = v;
-    }
+    for (int x = 0; x < W; x++) d[x] = s[g_xmap[x]];
     for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
   }
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
