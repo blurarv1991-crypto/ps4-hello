@@ -201,6 +201,7 @@ static int g_menu_sel = 0, g_menu_n = 0;
 static char g_ml[10][72];
 static char g_msg[80] = "";
 static int g_ranura = 1;
+static int g_res = 1; /* resolucion interna pedida al nucleo (1 a 4), se lee de res.txt al arrancar */
 static char g_juego_id[96] = "juego";
 static unsigned char g_estbuf[40 * 1024 * 1024];
 static int g_cada = 3;
@@ -372,6 +373,12 @@ static bool entorno(unsigned cmd, void *data) {
       }
       if (contiene(v->key, "GPU_Renderer")) {
         v->value = "Software";
+        return true;
+      }
+      if (contiene(v->key, "GPU_ResolutionScale")) {
+        static const char *rv[5] = {"1", "1", "2", "3", "4"};
+        v->value = rv[(g_res >= 1 && g_res <= 4) ? g_res : 1];
+        esp("RES pedida al nucleo: %s", v->value);
         return true;
       }
       if (contiene(v->key, "GPU_UseThread")) {
@@ -619,7 +626,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   int asp = 0;
   if (g_asp) {
     int Wa = (H * 4 + 1) / 3;
-    if (Wa >= w && Wa <= 1920) { W = Wa; asp = 1; }
+    if (Wa >= 1 && Wa <= 1920) { W = Wa; asp = 1; }
   }
   if (!asp) {
     /* pixeles cuadrados: factor entero igual en ancho y alto */
@@ -1029,6 +1036,20 @@ static void estado_cargar(void) {
   esp("ESTADO cargado OK");
 }
 
+static void res_guardar(void) {
+  FILE *f = fopen("/data/swan/res.txt", "wb");
+  if (!f) return;
+  fputc('0' + g_res, f);
+  fclose(f);
+}
+
+static void res_cambiar(int d) {
+  g_res = ((g_res - 1 + d + 4) % 4) + 1;
+  res_guardar();
+  snprintf(g_msg, sizeof(g_msg), "Resolucion %dx: reabre la app para aplicar", g_res);
+  esp("RES cambiada en menu a %d (se aplica al reabrir)", g_res);
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -1036,7 +1057,7 @@ static void menu_refrescar(void) {
   snprintf(g_ml[2], sizeof(g_ml[2]), "Ranura: %d  (izq/der)", g_ranura);
   snprintf(g_ml[3], sizeof(g_ml[3]), "Escala: %s  (izq/der)", esc[g_modo & 3]);
   snprintf(g_ml[4], sizeof(g_ml[4]), "Aspecto: %s", g_asp ? "4:3" : "Cuadrado");
-  snprintf(g_ml[5], sizeof(g_ml[5]), "Resolucion interna: pendiente");
+  snprintf(g_ml[5], sizeof(g_ml[5]), "Resolucion interna: %dx  (izq/der)", g_res);
   snprintf(g_ml[6], sizeof(g_ml[6]), "Continuar");
   g_menu_n = 7;
 }
@@ -1074,6 +1095,7 @@ static void pausa_menu(void) {
       if (g_menu_sel == 2) g_ranura = ((g_ranura - 1 + dx + 4) % 4) + 1;
       else if (g_menu_sel == 3) g_modo = (g_modo + dx + 4) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
+      else if (g_menu_sel == 5) res_cambiar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -1082,6 +1104,7 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 2) g_ranura = (g_ranura % 4) + 1;
       else if (g_menu_sel == 3) g_modo = (g_modo + 1) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
+      else if (g_menu_sel == 5) res_cambiar(1);
       else if (g_menu_sel == 6) salir = 1;
     }
     menu_refrescar();
@@ -1104,6 +1127,15 @@ int main(void) {
 
   /* Por defecto: Cached Interpreter. Con /data/swan/puro.txt: interprete puro */
   g_interp = existe("/data/swan/puro.txt") ? 1 : 0;
+  {
+    FILE *fr = fopen("/data/swan/res.txt", "rb");
+    if (fr) {
+      int c = fgetc(fr);
+      fclose(fr);
+      if (c >= '1' && c <= '4') g_res = c - '0';
+    }
+    esp("RES leida de res.txt: %d", g_res);
+  }
   g_cached = g_interp ? 0 : 1;
   g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   esp("ARRANQUE interp=%d cached=%d", g_interp, g_cached);
