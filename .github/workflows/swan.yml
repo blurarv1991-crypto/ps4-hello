@@ -18,7 +18,6 @@ jobs:
           mkdir tc && tar -xzf tc.tgz -C tc
           sudo apt-get install -y clang lld python3 > /dev/null
           
-          # Ajustes base para toolchain PS4
           sed -i '86s/.*/#define ABI_SYSV 1/' swan/src/core/cpu_recompiler_types.h
           sed -i 's/defined(__FreeBSD__)/defined(__x86_64__)/g' swan/src/common/memory_arena.h swan/src/common/memory_arena.cpp
           sed -i 's/std::clamp(/std::clamp<float>(/g' swan/src/core/analog_controller.cpp swan/src/core/analog_joystick.cpp swan/src/core/negcon.cpp swan/src/core/negcon_rumble.cpp
@@ -27,50 +26,33 @@ jobs:
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
 
-          # Parches de EmuSuNi para JIT Arena y RAM sin shm_open en PS4
           python3 - << 'EOF'
-          import os
+import os
 
-          # 1. Parche en bus.cpp: Memoria RAM directa de heap sin shm_open / fastmem mmap
-          bus_file = 'swan/src/core/bus.cpp'
-          if os.path.exists(bus_file):
-              with open(bus_file, 'r') as f:
-                  content = f.read()
-              if 'm_memory_arena.Initialize' in content:
-                  content = content.replace(
-                      'm_memory_arena.Initialize(RAM_SIZE, false, false)',
-                      '#if defined(EMUSUNI_PORT)\n  m_ram = (u8*)std::calloc(1, RAM_SIZE);\n#else\n  m_memory_arena.Initialize(RAM_SIZE, false, false)\n#endif'
-                  )
-                  with open(bus_file, 'w') as f:
-                      f.write(content)
-                  print("Parche bus.cpp aplicado.")
+bus_file = 'swan/src/core/bus.cpp'
+if os.path.exists(bus_file):
+    with open(bus_file, 'r') as f:
+        content = f.read()
+    if 'm_memory_arena.Initialize' in content:
+        content = content.replace(
+            'm_memory_arena.Initialize(RAM_SIZE, false, false)',
+            '#if defined(EMUSUNI_PORT)\n  m_ram = (u8*)std::calloc(1, RAM_SIZE);\n#else\n  m_memory_arena.Initialize(RAM_SIZE, false, false)\n#endif'
+        )
+        with open(bus_file, 'w') as f:
+            f.write(content)
+        print("Parche bus.cpp OK")
 
-          # 2. Parche en cpu_code_cache.cpp: Usar emusuni_jit_arena para el buffer de codigo ejecutable
-          code_cache = 'swan/src/core/cpu_code_cache.cpp'
-          if os.path.exists(code_cache):
-              with open(code_cache, 'r') as f:
-                  c = f.read()
-              patch_hdr = '''
-          #if defined(EMUSUNI_PORT)
-          extern "C" void* emusuni_jit_arena(size_t size, const char* name);
-          #endif
-          '''
-              if 'extern "C" void* emusuni_jit_arena' not in c:
-                  c = patch_hdr + c
-              with open(code_cache, 'w') as f:
-                  f.write(c)
-              print("Header emusuni_jit_arena agregado a cpu_code_cache.cpp")
-
-          # 3. Parche en jit_code_buffer.cpp para omitir mprotect de libc
-          jit_buf = 'swan/src/common/jit_code_buffer.cpp'
-          if os.path.exists(jit_buf):
-              with open(jit_buf, 'r') as f:
-                  jb = f.read()
-              jb = jb.replace('#include <sys/mman.h>', '#include <sys/mman.h>\n#if defined(EMUSUNI_PORT)\n// Bypass mprotect de libc en PS4\n#endif')
-              with open(jit_buf, 'w') as f:
-                  f.write(jb)
-              print("Parche jit_code_buffer.cpp aplicado.")
-          EOF
+code_cache = 'swan/src/core/cpu_code_cache.cpp'
+if os.path.exists(code_cache):
+    with open(code_cache, 'r') as f:
+        c = f.read()
+    patch_hdr = '#if defined(EMUSUNI_PORT)\nextern "C" void* emusuni_jit_arena(size_t size, const char* name);\n#endif\n'
+    if 'extern "C" void* emusuni_jit_arena' not in c:
+        c = patch_hdr + c
+    with open(code_cache, 'w') as f:
+        f.write(c)
+    print("Header cpu_code_cache.cpp OK")
+EOF
 
       - name: Compilar
         run: |
@@ -162,10 +144,6 @@ jobs:
           echo ELF; ls -la p3.elf 2>&1 | cut -c1-80
           echo RETRO_RUN; nm p3.elf 2>/dev/null | grep -c " T retro_run" || true
           echo MAIN; nm p3.elf 2>/dev/null | grep -c " T main" || true
-          echo QUEDAN; head -12 s2.txt | cut -c1-90
-          echo PRIMERAS; head -3 l2.txt | cut -c1-150
-          echo RELLENOS; grep -c 'stub_hit("' stub.c || true
-          grep -o 'stub_hit("[^"]*")' stub.c | cut -c11-100 | head -80 || true
 
       - name: Guardar elf
         uses: actions/upload-artifact@v4
