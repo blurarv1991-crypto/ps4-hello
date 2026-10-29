@@ -142,6 +142,9 @@ void retro_set_input_state(int16_t (*cb)(unsigned, unsigned, unsigned, unsigned)
 void retro_init(void);
 bool retro_load_game(const struct retro_game_info *game);
 void retro_run(void);
+size_t retro_serialize_size(void);
+bool retro_serialize(void *data, size_t size);
+bool retro_unserialize(const void *data, size_t size);
 }
 
 static SDL_Renderer *R;
@@ -190,6 +193,16 @@ static int g_modo = 3;
 static int g_asp = 1; /* 1 = corregir a 4:3, 0 = pixeles cuadrados (L2+R2+L3 cambia) */
 static int g_xmap[1920];
 static int g_xmap_w = 0, g_xmap_W = 0;
+
+/* menu de opciones dentro del juego (L3) */
+static volatile int g_menu_toggle = 0;
+static volatile int g_menu_vis = 0;
+static int g_menu_sel = 0, g_menu_n = 0;
+static char g_ml[10][72];
+static char g_msg[80] = "";
+static int g_ranura = 1;
+static char g_juego_id[96] = "juego";
+static unsigned char g_estbuf[40 * 1024 * 1024];
 static int g_cada = 3;
 
 /* audio */
@@ -532,9 +545,10 @@ static void poll(void) {
   g_btn = b;
   /* L3 cambia la escala, R3 cambia cada cuantos frames se dibuja */
   uint32_t nuevos = b & ~g_btn_prev;
-  /* L2+R2 mantenidos y L3: cambia entre 4:3 y pixeles cuadrados */
+  /* L2+R2 mantenidos y L3: cambia entre 4:3 y pixeles cuadrados.
+     L3 solo: abre/cierra el menu de opciones */
   if ((nuevos & PB_L3) && (b & PB_L2) && (b & PB_R2)) g_asp = !g_asp;
-  else if (nuevos & PB_L3) g_modo = (g_modo + 1) % 4;
+  else if (nuevos & PB_L3) g_menu_toggle = 1;
   if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
   g_btn_prev = b;
 }
@@ -681,6 +695,24 @@ static void dibujar_juego(void) {
     if (g_modo == 0) g_kreal = 1;
     SDL_Rect dst = {(1920 - g_tw) / 2, (1080 - g_th) / 2, g_tw, g_th};
     SDL_RenderCopy(R, g_tex, NULL, &dst);
+  }
+  if (g_menu_vis) {
+    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(R, 0, 0, 40, 220);
+    SDL_Rect pn = {420, 180, 1080, 720};
+    SDL_RenderFillRect(R, &pn);
+    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
+    SDL_RenderSetScale(R, 3, 3);
+    texto(150, 60, "OPCIONES  (L3 o O: cerrar)");
+    int mn = g_menu_n;
+    for (int mi = 0; mi < mn && mi < 10; mi++) {
+      char ml[90];
+      snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
+      texto(150, 82 + mi * 18, ml);
+    }
+    char mg[90];
+    snprintf(mg, sizeof(mg), "%s", g_msg);
+    texto(150, 82 + mn * 18 + 10, mg);
   }
   double t1 = ahora_us();
   SDL_RenderSetScale(R, 2, 2);
@@ -958,6 +990,110 @@ static int elegir_juego(char *out, size_t outn) {
   return 1;
 }
 
+/* ---------------- guardado de estado y menu de opciones ---------------- */
+static void estado_ruta(char *out, size_t n, int slot) {
+  snprintf(out, n, "/data/swan/estado_%s_%d.sta", g_juego_id, slot);
+}
+
+static void estado_guardar(void) {
+  size_t sz = retro_serialize_size();
+  esp("ESTADO guardar: ranura=%d tam=%u", g_ranura, (unsigned)sz);
+  if (sz == 0) { snprintf(g_msg, sizeof(g_msg), "El nucleo no da tamano de estado"); return; }
+  if (sz > sizeof(g_estbuf)) { snprintf(g_msg, sizeof(g_msg), "Estado demasiado grande (%u KB)", (unsigned)(sz / 1024)); return; }
+  if (!retro_serialize(g_estbuf, sz)) { snprintf(g_msg, sizeof(g_msg), "Fallo al crear el estado"); esp("ESTADO retro_serialize FALLO"); return; }
+  char p[220];
+  estado_ruta(p, sizeof(p), g_ranura);
+  FILE *f = fopen(p, "wb");
+  if (!f) { snprintf(g_msg, sizeof(g_msg), "No se pudo crear el archivo"); esp("ESTADO fopen escritura FALLO %s", p); return; }
+  size_t w = fwrite(g_estbuf, 1, sz, f);
+  fclose(f);
+  if (w != sz) { snprintf(g_msg, sizeof(g_msg), "Escritura incompleta"); esp("ESTADO escritura %u de %u", (unsigned)w, (unsigned)sz); return; }
+  snprintf(g_msg, sizeof(g_msg), "Guardado en ranura %d (%u KB)", g_ranura, (unsigned)(sz / 1024));
+  esp("ESTADO guardado OK %s", p);
+}
+
+static void estado_cargar(void) {
+  char p[220];
+  estado_ruta(p, sizeof(p), g_ranura);
+  long long n = tam_ruta(p);
+  esp("ESTADO cargar: %s tam=%lld", p, n);
+  if (n <= 0) { snprintf(g_msg, sizeof(g_msg), "Ranura %d vacia", g_ranura); return; }
+  if ((unsigned long long)n > sizeof(g_estbuf)) { snprintf(g_msg, sizeof(g_msg), "Archivo demasiado grande"); return; }
+  FILE *f = fopen(p, "rb");
+  if (!f) { snprintf(g_msg, sizeof(g_msg), "No se pudo abrir el archivo"); return; }
+  size_t r = fread(g_estbuf, 1, (size_t)n, f);
+  fclose(f);
+  if (r != (size_t)n) { snprintf(g_msg, sizeof(g_msg), "Lectura incompleta"); return; }
+  if (!retro_unserialize(g_estbuf, (size_t)n)) { snprintf(g_msg, sizeof(g_msg), "El nucleo rechazo el estado"); esp("ESTADO retro_unserialize FALLO"); return; }
+  snprintf(g_msg, sizeof(g_msg), "Cargado de ranura %d", g_ranura);
+  esp("ESTADO cargado OK");
+}
+
+static void menu_refrescar(void) {
+  const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
+  snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
+  snprintf(g_ml[1], sizeof(g_ml[1]), "Cargar estado");
+  snprintf(g_ml[2], sizeof(g_ml[2]), "Ranura: %d  (izq/der)", g_ranura);
+  snprintf(g_ml[3], sizeof(g_ml[3]), "Escala: %s  (izq/der)", esc[g_modo & 3]);
+  snprintf(g_ml[4], sizeof(g_ml[4]), "Aspecto: %s", g_asp ? "4:3" : "Cuadrado");
+  snprintf(g_ml[5], sizeof(g_ml[5]), "Resolucion interna: pendiente");
+  snprintf(g_ml[6], sizeof(g_ml[6]), "Continuar");
+  g_menu_n = 7;
+}
+
+static void menu_pedir_dibujo(void) {
+  if (g_dib_hilo) {
+    if (__atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 0)
+      __atomic_store_n(&g_dib_estado, 1, __ATOMIC_RELEASE);
+  } else {
+    dibujar_juego();
+  }
+}
+
+/* El juego queda en pausa (no se llama a retro_run) mientras el menu esta abierto */
+static void pausa_menu(void) {
+  esp("MENU opciones: abre");
+  g_menu_sel = 0;
+  g_msg[0] = 0;
+  menu_refrescar();
+  g_menu_vis = 1;
+  poll();
+  g_menu_toggle = 0;
+  unsigned prev = g_mask;
+  for (;;) {
+    poll();
+    if (g_menu_toggle) { g_menu_toggle = 0; break; }
+    unsigned m = g_mask;
+    unsigned nw = m & ~prev;
+    prev = m;
+    int salir = 0;
+    if (nw & (1u << 4)) g_menu_sel = (g_menu_sel + g_menu_n - 1) % g_menu_n;
+    if (nw & (1u << 5)) g_menu_sel = (g_menu_sel + 1) % g_menu_n;
+    int dx = ((nw & (1u << 7)) ? 1 : 0) - ((nw & (1u << 6)) ? 1 : 0);
+    if (dx != 0) {
+      if (g_menu_sel == 2) g_ranura = ((g_ranura - 1 + dx + 4) % 4) + 1;
+      else if (g_menu_sel == 3) g_modo = (g_modo + dx + 4) % 4;
+      else if (g_menu_sel == 4) g_asp = !g_asp;
+    }
+    if (nw & (1u << 8)) salir = 1;
+    if (nw & (1u << 0)) {
+      if (g_menu_sel == 0) estado_guardar();
+      else if (g_menu_sel == 1) estado_cargar();
+      else if (g_menu_sel == 2) g_ranura = (g_ranura % 4) + 1;
+      else if (g_menu_sel == 3) g_modo = (g_modo + 1) % 4;
+      else if (g_menu_sel == 4) g_asp = !g_asp;
+      else if (g_menu_sel == 6) salir = 1;
+    }
+    menu_refrescar();
+    if (salir) break;
+    SDL_PumpEvents();
+    menu_pedir_dibujo();
+    SDL_Delay(30);
+  }
+  g_menu_vis = 0;
+  esp("MENU opciones: cierra");
+}
+
 int main(void) {
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
@@ -1070,6 +1206,25 @@ int main(void) {
   if (av.sample_rate > 8000.0 && av.sample_rate < 96000.0) g_srate = av.sample_rate;
   esp("AV fps=%.2f sample_rate=%.1f base=%ux%u", av.fps, av.sample_rate, av.base_width, av.base_height);
 
+  {
+    const char *b = ruta;
+    for (const char *q = ruta; *q; q++) {
+      if (*q == '/') b = q + 1;
+    }
+    snprintf(g_juego_id, sizeof(g_juego_id), "%s", b);
+    char *pt = NULL;
+    for (char *q = g_juego_id; *q; q++) {
+      if (*q == '.') pt = q;
+    }
+    if (pt) *pt = 0;
+    for (char *q = g_juego_id; *q; q++) {
+      char c = *q;
+      int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+      if (!ok) *q = '_';
+    }
+    if (!g_juego_id[0]) snprintf(g_juego_id, sizeof(g_juego_id), "juego");
+    esp("ESTADO id del juego: %s", g_juego_id);
+  }
   paso("4) load_game OK; mostrando imagen...");
   esp("INICIO frames (sin limite)");
   g_jugando = 1;
@@ -1098,6 +1253,10 @@ int main(void) {
     retro_run();
     a_run += ahora_us() - a;
     if (!g_hilo_ok) audio_enviar();
+    if (g_menu_toggle) {
+      g_menu_toggle = 0;
+      pausa_menu();
+    }
     i++;
     g_frames = i;
     if (i % g_cada == 0) {
