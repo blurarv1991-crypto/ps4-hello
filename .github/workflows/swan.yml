@@ -24,13 +24,11 @@ jobs:
           mkdir -p swan/dep/stub
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
-          printf '#if defined(EMUSUNI_PORT)\nextern "C" void* emusuni_jit_arena(size_t size, const char* name);\n#endif\n' | cat - swan/src/core/cpu_code_cache.cpp > temp && mv temp swan/src/core/cpu_code_cache.cpp
-          sed -i 's/m_memory_arena\.Initialize(RAM_SIZE, false, false)/m_ram = (u8*)std::calloc(1, RAM_SIZE)/g' swan/src/core/bus.cpp
       - name: Compilar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
           INC=$(find swan/dep -type d -name include | sed 's/^/-I /' | tr '\n' ' ')
-          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1 -DEMUSUNI_PORT=1"
+          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1"
           mkdir obj
           for f in swan/src/core/*.cpp swan/src/common/*.cpp; do
           case $f in *d3d*|*aarch32*|*aarch64*) continue;; esac
@@ -51,7 +49,7 @@ jobs:
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
           INC=$(find swan/dep -type d -name include | sed 's/^/-I /' | tr '\n' ' ')
-          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1 -DEMUSUNI_PORT=1"
+          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1"
           A=$(find swan/dep/libretro-common -name "*.c" \( -path "*/streams/*" -o -path "*/file/*" -o -path "*/vfs/*" -o -path "*/compat/*" -o -path "*/string/*" -o -path "*/encodings/*" -o -path "*/time/*" -o -path "*/rthreads/*" -o -path "*/memmap/*" \))
           B=$(grep -rl "retro_spsc_init\|data_transfer_open_prefix" swan/dep/libretro-common --include=*.c || true)
           for f in $(echo $A $B swan/dep/stb/src/stb_image.c | tr ' ' '\n' | sort -u); do
