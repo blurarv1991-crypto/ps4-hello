@@ -16,7 +16,9 @@ jobs:
           git clone --depth 1 https://github.com/libretro/swanstation.git swan
           curl -sL -o tc.tgz https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz
           mkdir tc && tar -xzf tc.tgz -C tc
-          sudo apt-get install -y clang lld > /dev/null
+          sudo apt-get install -y clang lld python3 > /dev/null
+          
+          # Ajustes base para toolchain PS4
           sed -i '86s/.*/#define ABI_SYSV 1/' swan/src/core/cpu_recompiler_types.h
           sed -i 's/defined(__FreeBSD__)/defined(__x86_64__)/g' swan/src/common/memory_arena.h swan/src/common/memory_arena.cpp
           sed -i 's/std::clamp(/std::clamp<float>(/g' swan/src/core/analog_controller.cpp swan/src/core/analog_joystick.cpp swan/src/core/negcon.cpp swan/src/core/negcon_rumble.cpp
@@ -24,11 +26,57 @@ jobs:
           mkdir -p swan/dep/stub
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
+
+          # Parches de EmuSuNi para JIT Arena y RAM sin shm_open en PS4
+          python3 - << 'EOF'
+          import os
+
+          # 1. Parche en bus.cpp: Memoria RAM directa de heap sin shm_open / fastmem mmap
+          bus_file = 'swan/src/core/bus.cpp'
+          if os.path.exists(bus_file):
+              with open(bus_file, 'r') as f:
+                  content = f.read()
+              if 'm_memory_arena.Initialize' in content:
+                  content = content.replace(
+                      'm_memory_arena.Initialize(RAM_SIZE, false, false)',
+                      '#if defined(EMUSUNI_PORT)\n  m_ram = (u8*)std::calloc(1, RAM_SIZE);\n#else\n  m_memory_arena.Initialize(RAM_SIZE, false, false)\n#endif'
+                  )
+                  with open(bus_file, 'w') as f:
+                      f.write(content)
+                  print("Parche bus.cpp aplicado.")
+
+          # 2. Parche en cpu_code_cache.cpp: Usar emusuni_jit_arena para el buffer de codigo ejecutable
+          code_cache = 'swan/src/core/cpu_code_cache.cpp'
+          if os.path.exists(code_cache):
+              with open(code_cache, 'r') as f:
+                  c = f.read()
+              patch_hdr = '''
+          #if defined(EMUSUNI_PORT)
+          extern "C" void* emusuni_jit_arena(size_t size, const char* name);
+          #endif
+          '''
+              if 'extern "C" void* emusuni_jit_arena' not in c:
+                  c = patch_hdr + c
+              with open(code_cache, 'w') as f:
+                  f.write(c)
+              print("Header emusuni_jit_arena agregado a cpu_code_cache.cpp")
+
+          # 3. Parche en jit_code_buffer.cpp para omitir mprotect de libc
+          jit_buf = 'swan/src/common/jit_code_buffer.cpp'
+          if os.path.exists(jit_buf):
+              with open(jit_buf, 'r') as f:
+                  jb = f.read()
+              jb = jb.replace('#include <sys/mman.h>', '#include <sys/mman.h>\n#if defined(EMUSUNI_PORT)\n// Bypass mprotect de libc en PS4\n#endif')
+              with open(jit_buf, 'w') as f:
+                  f.write(jb)
+              print("Parche jit_code_buffer.cpp aplicado.")
+          EOF
+
       - name: Compilar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
           INC=$(find swan/dep -type d -name include | sed 's/^/-I /' | tr '\n' ' ')
-          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1"
+          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1 -DEMUSUNI_PORT=1"
           mkdir obj
           for f in swan/src/core/*.cpp swan/src/common/*.cpp; do
           case $f in *d3d*|*aarch32*|*aarch64*) continue;; esac
@@ -36,6 +84,7 @@ jobs:
           if ! clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I swan/src $INC $X $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 -A2 "error:" e.txt | sed 's/.*error: //' | cut -c1-120 || true; fi
           done
           echo OBJETOS; ls obj | wc -l
+
       - name: Dependencias
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
@@ -45,11 +94,12 @@ jobs:
           if ! clang --target=x86_64-pc-freebsd12-elf -std=gnu11 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include $INC -I swan/dep/libchdr/deps/miniz-3.1.1 $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 "error:" e.txt | sed 's/.*error: //' | cut -c1-110 || true; fi
           done
           echo OBJETOS_DEP; ls obj | grep -c "^dep_"
+
       - name: Extra
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
           INC=$(find swan/dep -type d -name include | sed 's/^/-I /' | tr '\n' ' ')
-          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1"
+          X="-I swan/dep/xbyak/xbyak -I swan/dep/libchdr/deps/miniz-3.1.1 -I swan/dep/openbios -DRETRO_ATOMIC_FORCE_GCC_NEW -DWITH_RECOMPILER=1 -DEMUSUNI_PORT=1"
           A=$(find swan/dep/libretro-common -name "*.c" \( -path "*/streams/*" -o -path "*/file/*" -o -path "*/vfs/*" -o -path "*/compat/*" -o -path "*/string/*" -o -path "*/encodings/*" -o -path "*/time/*" -o -path "*/rthreads/*" -o -path "*/memmap/*" \))
           B=$(grep -rl "retro_spsc_init\|data_transfer_open_prefix" swan/dep/libretro-common --include=*.c || true)
           for f in $(echo $A $B swan/dep/stb/src/stb_image.c | tr ' ' '\n' | sort -u); do
@@ -62,6 +112,7 @@ jobs:
           if ! clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I swan/src $INC $X $f -o $O > e.txt 2>&1; then echo FALLA_$f; grep -m1 -A2 "error:" e.txt | sed 's/.*error: //' | cut -c1-110 || true; fi
           done
           echo OBJETOS_LIBRETRO; ls obj | grep -c "^lib_"
+
       - name: Frontend
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
@@ -69,6 +120,7 @@ jobs:
           ls -la frontend
           if ! clang++ --target=x86_64-pc-freebsd12-elf -std=gnu++17 -O1 -fPIC -c -w -isysroot $OO -isystem $OO/include -isystem $OO/include/c++/v1 -I frontend frontend/main.cpp -o obj/frontend_main.o > e.txt 2>&1; then echo FALLA_MAIN; grep -m3 -A2 "error:" e.txt | cut -c1-120 || true; fi
           echo OBJ_MAIN; ls obj | grep -c "^frontend_main"
+
       - name: Enlazar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
@@ -114,6 +166,7 @@ jobs:
           echo PRIMERAS; head -3 l2.txt | cut -c1-150
           echo RELLENOS; grep -c 'stub_hit("' stub.c || true
           grep -o 'stub_hit("[^"]*")' stub.c | cut -c11-100 | head -80 || true
+
       - name: Guardar elf
         uses: actions/upload-artifact@v4
         with:
