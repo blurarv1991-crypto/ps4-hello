@@ -204,7 +204,9 @@ static char g_ml[10][72];
 static char g_msg[80] = "";
 static int g_ranura = 1;
 static char g_juego_id[96] = "juego";
-static unsigned char g_estbuf[40 * 1024 * 1024];
+
+/* Buffer de estado: 16 MiB (Pepsiman ocupa 11 MiB; evita saturar la memoria estatica del ELF) */
+static unsigned char g_estbuf[16 * 1024 * 1024];
 static int g_cada = 3;
 
 /* audio */
@@ -818,7 +820,6 @@ static int ext_juego(const char *n) {
   return !cmp_ci(e, "cue") || !cmp_ci(e, "chd") || !cmp_ci(e, "pbp") || !cmp_ci(e, "iso") || !cmp_ci(e, "bin");
 }
 
-/* a y b con extension de 3 letras: mismo nombre sin la extension */
 static int mismo_nombre(const char *a, const char *b) {
   size_t la = strlen(a), lb = strlen(b);
   if (la != lb || la < 4) return 0;
@@ -863,7 +864,6 @@ static int listar_juegos(void) {
   mia_k_close(fd);
   esp("MENU getdents bytes=%d archivos=%d", total_bytes, g_nj);
 
-  /* oculta los .bin que tienen un .cue con el mismo nombre */
   int k = 0;
   for (int i = 0; i < g_nj; i++) {
     int ocultar = 0;
@@ -882,7 +882,6 @@ static int listar_juegos(void) {
   }
   g_nj = k;
 
-  /* orden alfabetico */
   for (int i = 1; i < g_nj; i++) {
     char tmp[128];
     memcpy(tmp, g_jn[i], sizeof(tmp));
@@ -926,7 +925,6 @@ static void dibujar_menu(int sel, int top) {
   SDL_RenderPresent(R);
 }
 
-/* Muestra el menu y devuelve 1 con la ruta elegida en out; 0 si no hay juegos en la carpeta */
 static int elegir_juego(char *out, size_t outn) {
   int n = listar_juegos();
   if (n <= 0) return 0;
@@ -1060,7 +1058,6 @@ static void menu_pedir_dibujo(void) {
   }
 }
 
-/* El juego queda en pausa (no se llama a retro_run) mientras el menu esta abierto */
 static void pausa_menu(void) {
   esp("MENU opciones: abre");
   g_menu_sel = 0;
@@ -1104,29 +1101,27 @@ static void pausa_menu(void) {
   esp("MENU opciones: cierra");
 }
 
-/* ---------------- Buffer y funcion JIT para SwanStation (EmuSuNi method) ----------------
-   Array de 32 MiB alineado a 16 KiB en memoria fija de la aplicacion.
-   Se marca ejecutable (RWX) una sola vez mediante sceKernelMprotect. */
-#define PS1_JIT_ARENA_BYTES (32 * 1024 * 1024)
+/* ---------------- Buffer y funcion JIT para SwanStation (EmuSuNi: 24 MiB) ----------------
+   24 MiB (16 MiB codigo + 8 MiB caminos lentos) alineados a 16 KiB */
+#define PS1_JIT_ARENA_BYTES (24 * 1024 * 1024)
 static unsigned char g_ps1_jit_arena[PS1_JIT_ARENA_BYTES] __attribute__((aligned(16384)));
 static bool g_jit_arena_iniciada = false;
 
 extern "C" void* emusuni_jit_arena(size_t size, const char* name) {
   esp("JIT arena solicitada: tam=%zu bytes nombre=%s", size, name ? name : "(null)");
   if (size > sizeof(g_ps1_jit_arena)) {
-    esp("JIT arena ERROR: tamaño pedido (%zu) supera los 32 MiB disponibles", size);
+    esp("JIT arena ERROR: tamaño pedido (%zu) supera los 24 MiB disponibles", size);
     return NULL;
   }
   if (!g_jit_arena_iniciada) {
-    /* PROT_READ (1) | PROT_WRITE (2) | PROT_EXEC (4) = 7 */
     int r = mia_k_mprotect(g_ps1_jit_arena, sizeof(g_ps1_jit_arena), 7);
-    esp("JIT arena sceKernelMprotect(RWX, 32 MiB) = %d (%#x) en ptr=%p", r, (unsigned)r, (void*)g_ps1_jit_arena);
+    esp("JIT arena sceKernelMprotect(RWX, 24 MiB) = %d (%#x) en ptr=%p", r, (unsigned)r, (void*)g_ps1_jit_arena);
     if (r != 0) {
       esp("JIT arena ERROR: sceKernelMprotect fallo, no se puede dar memoria ejecutable");
       return NULL;
     }
     g_jit_arena_iniciada = true;
-    esp("JIT arena inicializada con exito en %p (alineada a 16 KiB)", (void*)g_ps1_jit_arena);
+    esp("JIT arena inicializada con exito en %p (24 MiB, alineada 16K)", (void*)g_ps1_jit_arena);
   }
   return g_ps1_jit_arena;
 }
