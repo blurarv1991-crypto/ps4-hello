@@ -359,6 +359,11 @@ static bool entorno(unsigned cmd, void *data) {
         v->value = "0";
         return true;
       }
+      /* Tarjeta de memoria 1: el propio nucleo la guarda en /data/swan/<codigo>_1.mcd */
+      if (contiene(v->key, "Card1Type")) {
+        v->value = "PerGame";
+        return true;
+      }
       if (g_cached && contiene(v->key, "executionmode")) {
         v->value = "CachedInterpreter";
         return true;
@@ -718,8 +723,9 @@ int main(void) {
   g_main = SDL_ThreadID();
   mkdir("/data/swan", 0777);
 
-  g_interp = existe("/data/swan/interp.txt") ? 1 : 0;
-  g_cached = existe("/data/swan/cached.txt") ? 1 : 0;
+  /* Por defecto: Cached Interpreter. Con /data/swan/puro.txt: interprete puro */
+  g_interp = existe("/data/swan/puro.txt") ? 1 : 0;
+  g_cached = g_interp ? 0 : 1;
   g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   esp("ARRANQUE interp=%d cached=%d", g_interp, g_cached);
 
