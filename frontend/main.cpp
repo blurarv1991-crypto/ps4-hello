@@ -187,10 +187,9 @@ static unsigned g_mask = 0;
 static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
 static int g_modo = 3;
-static int g_asp = 1; /* 1 = corregir a 4:3, 0 = pixeles cuadrados (Share cambia) */
+static int g_asp = 1; /* 1 = corregir a 4:3, 0 = pixeles cuadrados (L2+R2+L3 cambia) */
 static int g_xmap[1920];
 static int g_xmap_w = 0, g_xmap_W = 0;
-#define PB_SHARE 0x00800000u
 static int g_cada = 3;
 
 /* audio */
@@ -533,8 +532,9 @@ static void poll(void) {
   g_btn = b;
   /* L3 cambia la escala, R3 cambia cada cuantos frames se dibuja */
   uint32_t nuevos = b & ~g_btn_prev;
-  if (nuevos & PB_L3) g_modo = (g_modo + 1) % 4;
-  if (nuevos & PB_SHARE) g_asp = !g_asp;
+  /* L2+R2 mantenidos y L3: cambia entre 4:3 y pixeles cuadrados */
+  if ((nuevos & PB_L3) && (b & PB_L2) && (b & PB_R2)) g_asp = !g_asp;
+  else if (nuevos & PB_L3) g_modo = (g_modo + 1) % 4;
   if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
   g_btn_prev = b;
 }
@@ -1084,6 +1084,8 @@ int main(void) {
   }
   /* El hilo de dibujo se usa siempre, salvo que exista /data/swan/sin_hilo.txt */
   int quiere_hilo = existe("/data/swan/sin_hilo.txt") ? 0 : 1;
+  /* Con /data/swan/sin_aspecto.txt se arranca con pixeles cuadrados */
+  if (existe("/data/swan/sin_aspecto.txt")) g_asp = 0;
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
     SDL_Thread *td = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
