@@ -23,7 +23,7 @@ int mia_aud_open(int uid, int tipo, int indice, unsigned len, unsigned freq, uns
 int mia_aud_out(int handle, const void *datos) __asm__("sceAudioOutOutput");
 }
 
-/* Carpetas y memoria: funciones del nucleo de la PS4 (libkernel) */
+/* Carpetas: funciones del nucleo de la PS4 (libkernel) para listar /data/swan/juegos */
 extern "C" {
 int mia_k_open(const char *ruta, int flags, int modo) __asm__("sceKernelOpen");
 int mia_k_getdents(int fd, char *buf, int n) __asm__("sceKernelGetdents");
@@ -37,7 +37,7 @@ typedef OrbisPadData ScePadData;
 #define SHM_ANON ((char *)1)
 #endif
 
-/* Mascaras de botones de ScePad (verificadas en PS4; SHARE = 0x800000 no se usa) */
+/* Mascaras de botones de ScePad (todas verificadas en la PS4; SHARE = 0x800000 no se usa) */
 #define PB_L3 0x00000002u
 #define PB_R3 0x00000004u
 #define PB_OPTIONS 0x00000008u
@@ -167,7 +167,6 @@ static int g_frames = 0;
 static volatile int g_traza = 0;
 static volatile int g_dentro = 0;
 static int g_fd = -1;
-static int g_jit = 0;
 static int g_interp = 0;
 static int g_cached = 0;
 static int g_jugando = 0;
@@ -204,9 +203,7 @@ static char g_ml[10][72];
 static char g_msg[80] = "";
 static int g_ranura = 1;
 static char g_juego_id[96] = "juego";
-
-/* Buffer de estado: 16 MiB (Pepsiman ocupa 11 MiB; evita saturar la memoria estatica del ELF) */
-static unsigned char g_estbuf[16 * 1024 * 1024];
+static unsigned char g_estbuf[40 * 1024 * 1024];
 static int g_cada = 3;
 
 /* audio */
@@ -391,23 +388,13 @@ static bool entorno(unsigned cmd, void *data) {
         v->value = "PerGame";
         return true;
       }
-      /* Modo de ejecucion: Recompiler si jit.txt existe, o Cached / Interpreter */
-      if (contiene(v->key, "executionmode")) {
-        if (g_jit) {
-          v->value = "Recompiler";
-          esp("ENV15 executionmode -> Recompiler (JIT)");
-          return true;
-        }
-        if (g_cached) {
-          v->value = "CachedInterpreter";
-          esp("ENV15 executionmode -> CachedInterpreter");
-          return true;
-        }
-        if (g_interp) {
-          v->value = "Interpreter";
-          esp("ENV15 executionmode -> Interpreter");
-          return true;
-        }
+      if (g_cached && contiene(v->key, "executionmode")) {
+        v->value = "CachedInterpreter";
+        return true;
+      }
+      if (g_interp && contiene(v->key, "executionmode")) {
+        v->value = "Interpreter";
+        return true;
       }
       v->value = NULL;
       return false;
@@ -495,7 +482,8 @@ static void audio_enviar(void) {
   }
 }
 
-/* Hilo de audio: lee la cola circular y llama a sceAudioOutOutput (que bloquea). */
+/* Hilo de audio: lee la cola circular y llama a sceAudioOutOutput (que bloquea).
+   Si falta audio manda un bloque de silencio para mantener el ritmo. */
 static int hilo_audio(void *arg) {
   (void)arg;
   static int16_t grano[GRANO * 2];
@@ -681,7 +669,7 @@ static void dibujar_juego(void) {
     if (!g_tex || g_tw != (int)g_sw || g_th != (int)g_sh) {
       if (g_tex) SDL_DestroyTexture(g_tex);
       Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
-      g_tex = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, (int)g_sw, (int)g_th);
+      g_tex = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, (int)g_sw, (int)g_sh);
       g_tw = (int)g_sw;
       g_th = (int)g_sh;
       esp("TEXTURA %dx%d fmt=%d ptr=%p", g_tw, g_th, g_pf, (void *)g_tex);
@@ -730,8 +718,7 @@ static void dibujar_juego(void) {
   double t1 = ahora_us();
   SDL_RenderSetScale(R, 2, 2);
   char t[240];
-  snprintf(t, sizeof(t), "F:%d %s run:%d.%d pre:%d.%d k:%d pad:%x au:%d in/s:%d q:%u",
-           g_frames, g_jit ? "JIT" : (g_cached ? "CACHED" : "INTERP"),
+  snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d k:%d pad:%x au:%d in/s:%d q:%u", g_frames,
            m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, g_kreal, (unsigned)g_btn, g_aud, m_ain, g_at - g_ah);
   texto(5, 5, t);
   double t2 = ahora_us();
@@ -785,6 +772,7 @@ static int hilo_dibujo(void *arg) {
       }
       __atomic_store_n(&g_dib_estado, 0, __ATOMIC_RELEASE);
     } else {
+      /* espera sin llamar a ninguna libreria (por si fallan en este hilo) */
       __builtin_ia32_pause();
     }
   }
@@ -820,6 +808,7 @@ static int ext_juego(const char *n) {
   return !cmp_ci(e, "cue") || !cmp_ci(e, "chd") || !cmp_ci(e, "pbp") || !cmp_ci(e, "iso") || !cmp_ci(e, "bin");
 }
 
+/* a y b con extension de 3 letras: mismo nombre sin la extension */
 static int mismo_nombre(const char *a, const char *b) {
   size_t la = strlen(a), lb = strlen(b);
   if (la != lb || la < 4) return 0;
@@ -864,6 +853,7 @@ static int listar_juegos(void) {
   mia_k_close(fd);
   esp("MENU getdents bytes=%d archivos=%d", total_bytes, g_nj);
 
+  /* oculta los .bin que tienen un .cue con el mismo nombre */
   int k = 0;
   for (int i = 0; i < g_nj; i++) {
     int ocultar = 0;
@@ -882,6 +872,7 @@ static int listar_juegos(void) {
   }
   g_nj = k;
 
+  /* orden alfabetico */
   for (int i = 1; i < g_nj; i++) {
     char tmp[128];
     memcpy(tmp, g_jn[i], sizeof(tmp));
@@ -925,6 +916,7 @@ static void dibujar_menu(int sel, int top) {
   SDL_RenderPresent(R);
 }
 
+/* Muestra el menu y devuelve 1 con la ruta elegida en out; 0 si no hay juegos en la carpeta */
 static int elegir_juego(char *out, size_t outn) {
   int n = listar_juegos();
   if (n <= 0) return 0;
@@ -1058,6 +1050,7 @@ static void menu_pedir_dibujo(void) {
   }
 }
 
+/* El juego queda en pausa (no se llama a retro_run) mientras el menu esta abierto */
 static void pausa_menu(void) {
   esp("MENU opciones: abre");
   g_menu_sel = 0;
@@ -1101,32 +1094,10 @@ static void pausa_menu(void) {
   esp("MENU opciones: cierra");
 }
 
-/* ---------------- Buffer y funcion JIT para SwanStation (EmuSuNi: 24 MiB) ----------------
-   24 MiB (16 MiB codigo + 8 MiB caminos lentos) alineados a 16 KiB */
-#define PS1_JIT_ARENA_BYTES (24 * 1024 * 1024)
-static unsigned char g_ps1_jit_arena[PS1_JIT_ARENA_BYTES] __attribute__((aligned(16384)));
-static bool g_jit_arena_iniciada = false;
-
-extern "C" void* emusuni_jit_arena(size_t size, const char* name) {
-  esp("JIT arena solicitada: tam=%zu bytes nombre=%s", size, name ? name : "(null)");
-  if (size > sizeof(g_ps1_jit_arena)) {
-    esp("JIT arena ERROR: tamaño pedido (%zu) supera los 24 MiB disponibles", size);
-    return NULL;
-  }
-  if (!g_jit_arena_iniciada) {
-    int r = mia_k_mprotect(g_ps1_jit_arena, sizeof(g_ps1_jit_arena), 7);
-    esp("JIT arena sceKernelMprotect(RWX, 24 MiB) = %d (%#x) en ptr=%p", r, (unsigned)r, (void*)g_ps1_jit_arena);
-    if (r != 0) {
-      esp("JIT arena ERROR: sceKernelMprotect fallo, no se puede dar memoria ejecutable");
-      return NULL;
-    }
-    g_jit_arena_iniciada = true;
-    esp("JIT arena inicializada con exito en %p (24 MiB, alineada 16K)", (void*)g_ps1_jit_arena);
-  }
-  return g_ps1_jit_arena;
-}
-
-/* ---------------- prueba de memoria ejecutable (JIT), solo con jit_prueba.txt ---------------- */
+/* ---------------- prueba de memoria ejecutable (JIT), solo con jit_prueba.txt ----------------
+   Imita lo que hace EmuSuNi (port/ps4_n64.c): array estatico alineado a 16 KiB, sceKernelMprotect con
+   lectura+escritura+ejecucion y una funcion minima ejecutada ahi. Cada paso se escribe en el log ANTES
+   de hacerlo: si la app se cierra, la ultima linea JIT dice donde. */
 #define JIT_PRUEBA_TAM (64 * 1024)
 static unsigned char g_jit_prueba[JIT_PRUEBA_TAM] __attribute__((aligned(16384)));
 
@@ -1144,7 +1115,7 @@ static void jit_prueba(void) {
   }
   static const unsigned char codigo[] = {0xB8, 0x36, 0x4E, 0x00, 0x00, 0xC3}; /* mov eax,0x4E36; ret */
   memcpy(g_jit_prueba, codigo, sizeof(codigo));
-  esp("JIT prueba: ejecutando la funcion de prueba...");
+  esp("JIT prueba: ejecutando la funcion de prueba (si el log acaba aqui, ejecutar ahi cierra la app)...");
   int v = ((int (*)(void))g_jit_prueba)();
   esp("JIT prueba: la funcion devolvio %#x (esperado 0x4e36): %s", (unsigned)v, v == 0x4E36 ? "FUNCIONA" : "resultado raro");
 }
@@ -1157,16 +1128,11 @@ int main(void) {
   g_main = SDL_ThreadID();
   mkdir("/data/swan", 0777);
 
-  /* Configuracion de ejecucion:
-     - Si existe /data/swan/jit.txt -> Recompilador JIT
-     - Si existe /data/swan/puro.txt -> Interprete puro
-     - Por defecto -> Cached Interpreter (estable y veloz) */
-  g_jit = existe("/data/swan/jit.txt") ? 1 : 0;
-  g_interp = (!g_jit && existe("/data/swan/puro.txt")) ? 1 : 0;
-  g_cached = (!g_jit && !g_interp) ? 1 : 0;
-
+  /* Por defecto: Cached Interpreter. Con /data/swan/puro.txt: interprete puro */
+  g_interp = existe("/data/swan/puro.txt") ? 1 : 0;
+  g_cached = g_interp ? 0 : 1;
   g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  esp("ARRANQUE jit=%d cached=%d interp=%d", g_jit, g_cached, g_interp);
+  esp("ARRANQUE interp=%d cached=%d", g_interp, g_cached);
 
   SDL_RendererInfo ri;
   memset(&ri, 0, sizeof(ri));
@@ -1179,6 +1145,7 @@ int main(void) {
 
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
+  /* Suposicion: el puntero a la funcion es el primer campo de sigaction */
   *(void **)&sa = (void *)al_fallo;
   sa.sa_flags = SA_SIGINFO;
   sigemptyset(&sa.sa_mask);
@@ -1195,7 +1162,8 @@ int main(void) {
   g_pad = scePadOpen(uid, 0, 0, NULL);
   esp("PAD userinit=%d getuser=%d uid=%d padinit=%d handle=%d", ru, rg, (int)uid, rp, g_pad);
 
-  /* Audio */
+  /* Audio: puerto principal, 256 muestras por bloque, 48000 Hz, S16 estereo.
+     Suposicion: tipo 0 = MAIN y formato 1 = S16_STEREO */
   int ra = mia_aud_init();
   int ids[3] = {0xFF, (int)uid, 0};
   for (int k = 0; k < 3; k++) {
@@ -1210,7 +1178,7 @@ int main(void) {
   char t[160];
   snprintf(t, sizeof(t), "%s %s API %u", info.library_name ? info.library_name : "?", info.library_version ? info.library_version : "?", retro_api_version());
   paso(t);
-  snprintf(t, sizeof(t), "fd=%d mode=%s pad=%d audio=%d rend=%s", g_fd, g_jit ? "JIT" : (g_cached ? "Cached" : "Interp"), g_pad, g_aud, g_rend);
+  snprintf(t, sizeof(t), "fd=%d interp=%d pad=%d audio=%d rend=%s", g_fd, g_interp, g_pad, g_aud, g_rend);
   paso(t);
 
   if (existe("/data/swan/jit_prueba.txt")) jit_prueba();
@@ -1228,6 +1196,7 @@ int main(void) {
   const char *ruta = NULL;
   if (elegir_juego(ruta_menu, sizeof(ruta_menu))) ruta = ruta_menu;
   if (!ruta) {
+    /* sin carpeta de juegos: se usa juego.* en /data/swan, como antes */
     const char *juegos[] = {"/data/swan/juego.chd", "/data/swan/juego.cue", "/data/swan/juego.pbp", "/data/swan/juego.iso", "/data/swan/juego.bin"};
     for (int i = 0; i < 5; i++) {
       if (existe(juegos[i])) { ruta = juegos[i]; break; }
@@ -1295,8 +1264,9 @@ int main(void) {
     g_hilo_ok = th ? 1 : 0;
     esp("AUDIO hilo %s", g_hilo_ok ? "creado" : "NO se pudo crear (audio en el bucle principal)");
   }
-
+  /* El hilo de dibujo se usa siempre, salvo que exista /data/swan/sin_hilo.txt */
   int quiere_hilo = existe("/data/swan/sin_hilo.txt") ? 0 : 1;
+  /* Con /data/swan/sin_aspecto.txt se arranca con pixeles cuadrados */
   if (existe("/data/swan/sin_aspecto.txt")) g_asp = 0;
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
@@ -1325,6 +1295,8 @@ int main(void) {
         dibujar_juego();
       }
     }
+    /* Ritmo: el audio marca el reloj. Si hay mas de ~50 ms acumulados, se espera
+       (tope 40 ms por frame, por si el hilo de audio se atasca). */
     if (g_hilo_ok) {
       int esperas = 0;
       while (esperas < 40 &&
@@ -1351,8 +1323,7 @@ int main(void) {
       unsigned dsil = hs - hs_prev;
       hb_prev = hb;
       hs_prev = hs;
-      esp("frame %d %s run=%d cop=%d pre=%d esc=%d dib=%d blq=%u sil=%u tot=%d k=%d cada=%d au=%d in/s=%d q=%u aok=%d",
-          i, g_jit ? "JIT" : "INT", m_run, m_cop, m_pre, m_esc, n_dib, dblq, dsil, m_tot, g_kreal, g_cada, g_aud, m_ain, g_at - g_ah, g_aout_ok);
+      esp("frame %d run=%d cop=%d pre=%d esc=%d dib=%d blq=%u sil=%u tot=%d k=%d cada=%d au=%d in/s=%d q=%u aok=%d", i, m_run, m_cop, m_pre, m_esc, n_dib, dblq, dsil, m_tot, g_kreal, g_cada, g_aud, m_ain, g_at - g_ah, g_aout_ok);
       a_aud = 0;
       n_blq = 0;
       a_run = a_upd = a_cop = a_pre = a_esc = 0;
