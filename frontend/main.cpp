@@ -23,6 +23,13 @@ int mia_aud_open(int uid, int tipo, int indice, unsigned len, unsigned freq, uns
 int mia_aud_out(int handle, const void *datos) __asm__("sceAudioOutOutput");
 }
 
+/* Carpetas: funciones del nucleo de la PS4 (libkernel) para listar /data/swan/juegos */
+extern "C" {
+int mia_k_open(const char *ruta, int flags, int modo) __asm__("sceKernelOpen");
+int mia_k_getdents(int fd, char *buf, int n) __asm__("sceKernelGetdents");
+int mia_k_close(int fd) __asm__("sceKernelClose");
+}
+
 typedef OrbisPadData ScePadData;
 
 #ifndef SHM_ANON
@@ -715,6 +722,218 @@ static int hilo_dibujo(void *arg) {
   return 0;
 }
 
+/* ---------------- menu de juegos ---------------- */
+#define MAX_JUEGOS 64
+#define CARPETA_JUEGOS "/data/swan/juegos"
+static char g_jn[MAX_JUEGOS][128];
+static int g_nj = 0;
+
+static int minus(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+static int cmp_ci(const char *a, const char *b) {
+  while (*a && *b && minus((unsigned char)*a) == minus((unsigned char)*b)) {
+    a++;
+    b++;
+  }
+  return minus((unsigned char)*a) - minus((unsigned char)*b);
+}
+
+static const char *extension(const char *n) {
+  const char *p = NULL;
+  for (; *n; n++) {
+    if (*n == '.') p = n;
+  }
+  return p ? p + 1 : "";
+}
+
+static int ext_juego(const char *n) {
+  const char *e = extension(n);
+  return !cmp_ci(e, "cue") || !cmp_ci(e, "chd") || !cmp_ci(e, "pbp") || !cmp_ci(e, "iso") || !cmp_ci(e, "bin");
+}
+
+/* a y b con extension de 3 letras: mismo nombre sin la extension */
+static int mismo_nombre(const char *a, const char *b) {
+  size_t la = strlen(a), lb = strlen(b);
+  if (la != lb || la < 4) return 0;
+  for (size_t i = 0; i + 3 < la; i++) {
+    if (minus((unsigned char)a[i]) != minus((unsigned char)b[i])) return 0;
+  }
+  return 1;
+}
+
+static int listar_juegos(void) {
+  g_nj = 0;
+  int fd = mia_k_open(CARPETA_JUEGOS, 0, 0);
+  esp("MENU carpeta %s open -> %d (0x%x)", CARPETA_JUEGOS, fd, (unsigned)fd);
+  if (fd < 0) return 0;
+  static char buf[16384];
+  int total_bytes = 0;
+  for (;;) {
+    int n = mia_k_getdents(fd, buf, (int)sizeof(buf));
+    if (n <= 0) {
+      if (n < 0) esp("MENU getdents error %d (0x%x)", n, (unsigned)n);
+      break;
+    }
+    total_bytes += n;
+    int pos = 0;
+    while (pos + 8 <= n) {
+      uint32_t fileno = 0;
+      uint16_t reclen = 0;
+      memcpy(&fileno, buf + pos, 4);
+      memcpy(&reclen, buf + pos + 4, 2);
+      unsigned tipo = (unsigned char)buf[pos + 6];
+      unsigned namlen = (unsigned char)buf[pos + 7];
+      const char *nm = buf + pos + 8;
+      if (reclen < 8 || pos + (int)reclen > n) break;
+      if (fileno != 0 && tipo != 4 && namlen > 0 && namlen < 128 && nm[0] != '.' && ext_juego(nm) &&
+          !contiene(nm, "(track") && g_nj < MAX_JUEGOS) {
+        snprintf(g_jn[g_nj], sizeof(g_jn[0]), "%.127s", nm);
+        g_nj++;
+      }
+      pos += reclen;
+    }
+  }
+  mia_k_close(fd);
+  esp("MENU getdents bytes=%d archivos=%d", total_bytes, g_nj);
+
+  /* oculta los .bin que tienen un .cue con el mismo nombre */
+  int k = 0;
+  for (int i = 0; i < g_nj; i++) {
+    int ocultar = 0;
+    if (!cmp_ci(extension(g_jn[i]), "bin")) {
+      for (int j = 0; j < g_nj; j++) {
+        if (j != i && !cmp_ci(extension(g_jn[j]), "cue") && mismo_nombre(g_jn[i], g_jn[j])) {
+          ocultar = 1;
+          break;
+        }
+      }
+    }
+    if (!ocultar) {
+      if (k != i) memcpy(g_jn[k], g_jn[i], sizeof(g_jn[0]));
+      k++;
+    }
+  }
+  g_nj = k;
+
+  /* orden alfabetico */
+  for (int i = 1; i < g_nj; i++) {
+    char tmp[128];
+    memcpy(tmp, g_jn[i], sizeof(tmp));
+    int j = i - 1;
+    while (j >= 0 && cmp_ci(g_jn[j], tmp) > 0) {
+      memcpy(g_jn[j + 1], g_jn[j], sizeof(tmp));
+      j--;
+    }
+    memcpy(g_jn[j + 1], tmp, sizeof(tmp));
+  }
+  return g_nj;
+}
+
+static void dibujar_menu(int sel, int top) {
+  SDL_SetRenderDrawColor(R, 0, 0, 80, 255);
+  SDL_RenderClear(R);
+  SDL_RenderSetScale(R, 2, 2);
+  char t[200];
+  snprintf(t, sizeof(t), "SwanStation PS4 - elige un juego (%d)", g_nj);
+  texto(10, 10, t);
+  texto(10, 26, "Arriba/Abajo: mover     X: jugar");
+  float y = 52;
+  const int VISIBLES = 28;
+  if (top > 0) {
+    texto(10, y, "   ...");
+  }
+  y += 14;
+  for (int i = top; i < g_nj && i < top + VISIBLES; i++) {
+    char nombre[128];
+    snprintf(nombre, sizeof(nombre), "%.127s", g_jn[i]);
+    char *p = NULL;
+    for (char *q = nombre; *q; q++) {
+      if (*q == '.') p = q;
+    }
+    if (p) *p = 0;
+    snprintf(t, sizeof(t), "%s %.90s", (i == sel) ? ">" : " ", nombre);
+    texto(10, y, t);
+    y += 14;
+  }
+  if (top + VISIBLES < g_nj) texto(10, y, "   ...");
+  SDL_RenderPresent(R);
+}
+
+/* Muestra el menu y devuelve 1 con la ruta elegida en out; 0 si no hay juegos en la carpeta */
+static int elegir_juego(char *out, size_t outn) {
+  int n = listar_juegos();
+  if (n <= 0) return 0;
+
+  int sel = 0;
+  char ult[160];
+  ult[0] = 0;
+  FILE *f = fopen("/data/swan/ultimo.txt", "rb");
+  if (f) {
+    if (fgets(ult, sizeof(ult), f)) {
+      for (char *q = ult; *q; q++) {
+        if (*q == '\n' || *q == '\r') *q = 0;
+      }
+    }
+    fclose(f);
+  }
+  for (int i = 0; i < n; i++) {
+    if (ult[0] && !cmp_ci(g_jn[i], ult)) sel = i;
+  }
+
+  if (g_pad >= 0) {
+    uint32_t prev = 0xFFFFFFFFu;
+    int dir_prev = 0;
+    unsigned t_sig = 0;
+    int top = 0;
+    {
+      ScePadData d0;
+      memset(&d0, 0, sizeof(d0));
+      if (scePadReadState(g_pad, &d0) == 0) prev = d0.buttons;
+    }
+    for (;;) {
+      SDL_PumpEvents();
+      ScePadData d;
+      memset(&d, 0, sizeof(d));
+      uint32_t b = 0;
+      int y = 128;
+      if (scePadReadState(g_pad, &d) == 0) {
+        b = d.buttons;
+        y = d.leftStick.y;
+      }
+      int dir = 0;
+      if ((b & PB_DOWN) || y > 192) dir = 1;
+      if ((b & PB_UP) || y < 64) dir = -1;
+      unsigned ahora = SDL_GetTicks();
+      if (dir != 0) {
+        if (dir != dir_prev) {
+          sel = (sel + dir + n) % n;
+          t_sig = ahora + 350;
+        } else if (ahora >= t_sig) {
+          sel = (sel + dir + n) % n;
+          t_sig = ahora + 90;
+        }
+      }
+      dir_prev = dir;
+      uint32_t nuevos = b & ~prev;
+      prev = b;
+      if (nuevos & PB_CROSS) break;
+      if (sel < top) top = sel;
+      if (sel >= top + 28) top = sel - 27;
+      dibujar_menu(sel, top);
+      SDL_Delay(16);
+    }
+  }
+
+  snprintf(out, outn, "%s/%s", CARPETA_JUEGOS, g_jn[sel]);
+  f = fopen("/data/swan/ultimo.txt", "wb");
+  if (f) {
+    fputs(g_jn[sel], f);
+    fclose(f);
+  }
+  esp("MENU elegido (%d de %d): %s", sel + 1, n, out);
+  return 1;
+}
+
 int main(void) {
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
@@ -786,13 +1005,18 @@ int main(void) {
   retro_init();
   paso("2) retro_init OK");
 
-  const char *juegos[] = {"/data/swan/juego.chd", "/data/swan/juego.cue", "/data/swan/juego.pbp", "/data/swan/juego.iso", "/data/swan/juego.bin"};
+  char ruta_menu[300];
   const char *ruta = NULL;
-  for (int i = 0; i < 5; i++) {
-    if (existe(juegos[i])) { ruta = juegos[i]; break; }
+  if (elegir_juego(ruta_menu, sizeof(ruta_menu))) ruta = ruta_menu;
+  if (!ruta) {
+    /* sin carpeta de juegos: se usa juego.* en /data/swan, como antes */
+    const char *juegos[] = {"/data/swan/juego.chd", "/data/swan/juego.cue", "/data/swan/juego.pbp", "/data/swan/juego.iso", "/data/swan/juego.bin"};
+    for (int i = 0; i < 5; i++) {
+      if (existe(juegos[i])) { ruta = juegos[i]; break; }
+    }
   }
   if (!ruta) {
-    paso("Sin juego en /data/swan");
+    paso("Sin juegos: pon archivos en /data/swan/juegos");
     esperar(1800);
     SDL_Quit();
     return 0;
