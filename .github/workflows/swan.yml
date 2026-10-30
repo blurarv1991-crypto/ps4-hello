@@ -37,6 +37,17 @@ jobs:
           grep -n "mprotect\|mmap\|Allocate\|Initialize\|guard\|PROT_EXEC\|__FreeBSD__\|__x86_64__" src/common/jit_code_buffer.cpp | cut -c1-170 || true
           echo "=== jit_code_buffer.h ==="
           grep -n "Allocate\|Initialize\|guard\|m_owns_buffer" src/common/jit_code_buffer.h | cut -c1-170 || true
+          echo "=== tamanos ==="
+          grep -rn "define RECOMPILER_CODE_CACHE_SIZE\|define RECOMPILER_FAR_CODE_CACHE_SIZE\|define RECOMPILER_GUARD_SIZE\|RECOMPILER_GUARD_SIZE =\|RECOMPILER_CODE_CACHE_SIZE =\|RECOMPILER_FAR_CODE_CACHE_SIZE =" src | cut -c1-170 || true
+          cd ..
+          mkdir -p fuentes
+          cp swan/src/core/cpu_code_cache.cpp swan/src/common/jit_code_buffer.cpp swan/src/common/jit_code_buffer.h fuentes/
+          ls -la fuentes
+      - name: Guardar fuentes para revisar
+        uses: actions/upload-artifact@v4
+        with:
+          name: swan-fuentes
+          path: fuentes/
       - name: Compilar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
