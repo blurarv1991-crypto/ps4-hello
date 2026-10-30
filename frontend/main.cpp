@@ -692,6 +692,7 @@ static inline uint16_t mezcla(uint16_t a, uint16_t b, unsigned w, uint32_t m) {
    un borde con su vecino de enfrente, mas o menos segun lo largo que sea el escalon.
    Usa la parte final de g_sbuf como memoria de trabajo (no hay memoria estatica nueva). */
 static int g_aa = 0;
+static int g_nit = 0; /* nitidez: 0 No, 1 Suave, 2 Fuerte */
 
 static inline int luma16(uint16_t p) {
   int r, g, b;
@@ -790,20 +791,69 @@ static void aa_filtrar(const uint16_t *src, uint16_t *dst, uint8_t *lum, int w, 
   }
 }
 
-/* Devuelve la imagen a usar para estirar: la original, o la filtrada (guardada en el final de g_sbuf,
-   lejos de donde se escribe la imagen estirada). Si no cabe, devuelve la original. */
-static const uint16_t *aa_aplicar(int w, int h, int W, int H, int nivel) {
-  if (nivel <= 0 || w < 8 || h < 8) return g_snap;
+/* Nitidez (mascara de enfoque de 4 vecinos) sobre la imagen original, antes de estirarla.
+   La correccion se limita para no crear halos ni resaltar demasiado el punteado (dither) del juego. */
+static void sharp_filtrar(const uint16_t *src, uint16_t *dst, int w, int h, int nivel) {
+  const int ka = (nivel == 2) ? 10 : 5; /* fuerza, en 1/32 */
+  const int gmax = (g_pf == 0) ? 31 : 63;
+  for (int y = 0; y < h; y++) {
+    const uint16_t *rc = src + (size_t)y * w;
+    const uint16_t *rn = src + (size_t)(y > 0 ? y - 1 : 0) * w;
+    const uint16_t *rs = src + (size_t)(y < h - 1 ? y + 1 : h - 1) * w;
+    uint16_t *d = dst + (size_t)y * w;
+    for (int x = 0; x < w; x++) {
+      int xl = x > 0 ? x - 1 : 0, xr = x < w - 1 ? x + 1 : w - 1;
+      uint16_t pc = rc[x], pn = rn[x], ps = rs[x], pw = rc[xl], pe = rc[xr];
+      int c[3][5];
+      uint16_t pp[5] = {pc, pn, ps, pw, pe};
+      for (int i = 0; i < 5; i++) {
+        uint16_t p = pp[i];
+        if (g_pf == 0) { c[0][i] = (p >> 10) & 31; c[1][i] = (p >> 5) & 31; c[2][i] = p & 31; }
+        else { c[0][i] = (p >> 11) & 31; c[1][i] = (p >> 5) & 63; c[2][i] = p & 31; }
+      }
+      int o[3];
+      for (int ch = 0; ch < 3; ch++) {
+        int mx = (ch == 1) ? gmax : 31;
+        int lap = 4 * c[ch][0] - c[ch][1] - c[ch][2] - c[ch][3] - c[ch][4];
+        int corr = (lap * ka) / 32;
+        int lim = mx / 6;
+        if (corr > lim) corr = lim;
+        if (corr < -lim) corr = -lim;
+        int v = c[ch][0] + corr;
+        if (v < 0) v = 0;
+        if (v > mx) v = mx;
+        o[ch] = v;
+      }
+      if (g_pf == 0) d[x] = (uint16_t)((o[0] << 10) | (o[1] << 5) | o[2]);
+      else d[x] = (uint16_t)((o[0] << 11) | (o[1] << 5) | o[2]);
+    }
+  }
+}
+
+/* Devuelve la imagen a usar para estirar: la original, o la procesada (bordes y/o nitidez), guardada
+   en el final de g_sbuf, lejos de donde se escribe la imagen estirada. Si no cabe, devuelve la original. */
+static const uint16_t *aa_aplicar(int w, int h, int W, int H, int nivel_aa, int nivel_nit) {
+  if ((nivel_aa <= 0 && nivel_nit <= 0) || w < 8 || h < 8) return g_snap;
   size_t total = (size_t)1920 * 1080;
   size_t lumb = (size_t)(w + 2) * (size_t)(h + 2);
   size_t lums = (lumb + 1) / 2;
   size_t wh = (size_t)w * (size_t)h;
-  if (wh + lums + (size_t)W * (size_t)H > total) return g_snap;
+  if (2 * wh + lums + (size_t)W * (size_t)H > total) return g_snap;
   uint8_t *lum = (uint8_t *)(g_sbuf + (total - lums));
-  uint16_t *dst = g_sbuf + (total - lums - wh);
+  uint16_t *bA = g_sbuf + (total - lums - wh);
+  uint16_t *bB = bA - wh;
   uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
-  aa_filtrar(g_snap, dst, lum, w, h, nivel, m);
-  return dst;
+  const uint16_t *cur = g_snap;
+  if (nivel_aa > 0) {
+    aa_filtrar(cur, bA, lum, w, h, nivel_aa, m);
+    cur = bA;
+  }
+  if (nivel_nit > 0) {
+    uint16_t *dst = (cur == bA) ? bB : bA;
+    sharp_filtrar(cur, dst, w, h, nivel_nit);
+    cur = dst;
+  }
+  return cur;
 }
 
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
@@ -836,7 +886,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     W = w * k;
     H = h * k;
   }
-  const uint16_t *src = aa_aplicar(w, h, W, H, g_aa);
+  const uint16_t *src = aa_aplicar(w, h, W, H, g_aa, g_nit);
   int sv = g_suav;
   if (sv && h <= 576 && W <= 1920 && H <= 1080) {
     uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
@@ -1307,6 +1357,14 @@ static void aa_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Bordes cambiado (no aplica con escala Original)");
 }
 
+static void nit_cambiar(int d) {
+  g_nit = (g_nit + d + 3) % 3;
+  FILE *f = fopen("/data/swan/nit.txt", "wb");
+  if (f) { fputc('0' + g_nit, f); fclose(f); }
+  esp("MENU: nitidez = %d", g_nit);
+  snprintf(g_msg, sizeof(g_msg), "Nitidez cambiada (no aplica con escala Original)");
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -1318,9 +1376,10 @@ static void menu_refrescar(void) {
   snprintf(g_ml[5], sizeof(g_ml[5]), "Suavizado: %s  (izq/der)", sv[g_suav % 3]);
   const char *bd[3] = {"No", "Suave", "Fuerte"};
   snprintf(g_ml[6], sizeof(g_ml[6]), "Bordes: %s  (izq/der)", bd[g_aa % 3]);
-  snprintf(g_ml[7], sizeof(g_ml[7]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
-  snprintf(g_ml[8], sizeof(g_ml[8]), "Continuar");
-  g_menu_n = 9;
+  snprintf(g_ml[7], sizeof(g_ml[7]), "Nitidez: %s  (izq/der)", bd[g_nit % 3]);
+  snprintf(g_ml[8], sizeof(g_ml[8]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
+  snprintf(g_ml[9], sizeof(g_ml[9]), "Continuar");
+  g_menu_n = 10;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -1358,7 +1417,8 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 4) g_asp = !g_asp;
       else if (g_menu_sel == 5) suav_cambiar(dx);
       else if (g_menu_sel == 6) aa_cambiar(dx);
-      else if (g_menu_sel == 7) jit_conmutar();
+      else if (g_menu_sel == 7) nit_cambiar(dx);
+      else if (g_menu_sel == 8) jit_conmutar();
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -1369,8 +1429,9 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 4) g_asp = !g_asp;
       else if (g_menu_sel == 5) suav_cambiar(1);
       else if (g_menu_sel == 6) aa_cambiar(1);
-      else if (g_menu_sel == 7) jit_conmutar();
-      else if (g_menu_sel == 8) salir = 1;
+      else if (g_menu_sel == 7) nit_cambiar(1);
+      else if (g_menu_sel == 8) jit_conmutar();
+      else if (g_menu_sel == 9) salir = 1;
     }
     menu_refrescar();
     if (salir) break;
@@ -1578,6 +1639,13 @@ int main(void) {
       if (c >= '0' && c <= '2') g_aa = c - '0';
     }
     esp("BORDES inicial=%d", g_aa);
+    FILE *fn = fopen("/data/swan/nit.txt", "rb");
+    if (fn) {
+      int c = fgetc(fn);
+      fclose(fn);
+      if (c >= '0' && c <= '2') g_nit = c - '0';
+    }
+    esp("NITIDEZ inicial=%d", g_nit);
   }
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
