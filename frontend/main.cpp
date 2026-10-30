@@ -281,6 +281,18 @@ static void log_core(int nivel, const char *fmt, ...) {
 
 #define TRAZA(...) do { if (g_traza && !g_jugando && !g_dentro) { g_dentro = 1; esp(__VA_ARGS__); g_dentro = 0; } } while (0)
 
+/* JIT (solo con /data/swan/jit.txt): zonas que ya se marcaron RWX con sceKernelMprotect */
+static int g_jit = 0;
+static unsigned long g_jit_ini[8];
+static unsigned long g_jit_fin[8];
+static int g_jit_n = 0;
+static int g_jit_logs = 0;
+static int jit_dentro(unsigned long a, unsigned long l) {
+  for (int i = 0; i < g_jit_n; i++)
+    if (a >= g_jit_ini[i] && a + l <= g_jit_fin[i]) return 1;
+  return 0;
+}
+
 extern "C" {
 int __real_shm_open(const char *p, int fl, mode_t m);
 int __real_shm_unlink(const char *p);
@@ -326,6 +338,27 @@ int __wrap_munmap(void *a, size_t l) {
 }
 
 int __wrap_mprotect(void *a, size_t l, int pr) {
+  if (g_jit) {
+    unsigned long ini = (unsigned long)a;
+    unsigned long fin = ini + (unsigned long)l;
+    if (jit_dentro(ini, (unsigned long)l)) {
+      /* Ya es RWX: se deja asi (tambien si el nucleo pide quitar ejecucion) */
+      if (g_jit_logs < 30) { g_jit_logs++; esp("JIT mprotect %p +%llu pr=%d: zona ya RWX, se ignora", a, (unsigned long long)l, pr); }
+      return 0;
+    }
+    if (pr & 4) {
+      unsigned long ri = ini & ~16383UL;
+      unsigned long rf = (fin + 16383UL) & ~16383UL;
+      esp("JIT mprotect %p +%llu pr=%d -> sceKernelMprotect(%p, %llu, RWX)", a, (unsigned long long)l, pr, (void *)ri, (unsigned long long)(rf - ri));
+      int r = mia_k_mprotect((void *)ri, (size_t)(rf - ri), 7);
+      esp("JIT sceKernelMprotect = %d (%#x)", r, (unsigned)r);
+      if (r == 0) {
+        if (g_jit_n < 8) { g_jit_ini[g_jit_n] = ri; g_jit_fin[g_jit_n] = rf; g_jit_n++; }
+        return 0;
+      }
+      esp("JIT: fallo, se prueba el mprotect normal");
+    }
+  }
   TRAZA("T> mprotect addr=%p len=%llu pr=%d", a, (unsigned long long)l, pr);
   int r = __real_mprotect(a, l, pr);
   TRAZA("T< mprotect = %d", r);
@@ -386,6 +419,11 @@ static bool entorno(unsigned cmd, void *data) {
       /* Tarjeta de memoria 1: el propio nucleo la guarda en /data/swan/<codigo>_1.mcd */
       if (contiene(v->key, "Card1Type")) {
         v->value = "PerGame";
+        return true;
+      }
+      if (g_jit && contiene(v->key, "executionmode")) {
+        esp("JIT: pidiendo modo Recompiler al nucleo");
+        v->value = "Recompiler";
         return true;
       }
       if (g_cached && contiene(v->key, "executionmode")) {
@@ -1133,6 +1171,12 @@ int main(void) {
   g_cached = g_interp ? 0 : 1;
   g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   esp("ARRANQUE interp=%d cached=%d", g_interp, g_cached);
+  if (existe("/data/swan/jit.txt")) {
+    g_jit = 1;
+    g_interp = 0;
+    g_cached = 0;
+    esp("JIT activado por jit.txt (modo Recompiler)");
+  }
 
   SDL_RendererInfo ri;
   memset(&ri, 0, sizeof(ri));
