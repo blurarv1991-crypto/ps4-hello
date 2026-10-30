@@ -24,30 +24,36 @@ jobs:
           mkdir -p swan/dep/stub
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
-      - name: Inspeccionar JIT (solo mirar, no cambia nada)
+      - name: Parchear JIT (buffer de codigo de 16 KiB, sin guardas)
         run: |
-          cd swan
-          echo "=== COMMIT ==="
-          git log -1 --format='%H %ad' | cut -c1-120
-          echo "=== USE_STATIC_CODE_BUFFER ==="
-          grep -rn "USE_STATIC_CODE_BUFFER" src | cut -c1-170 || true
-          echo "=== cpu_code_cache.cpp: buffer ==="
-          grep -n "has_buffer\|s_code_storage\|s_code_buffer\|JitCodeBuffer\|Allocate\|mprotect\|guard\|AllocateMemory\|CPUExecutionMode" src/core/cpu_code_cache.cpp | cut -c1-170 || true
-          echo "=== jit_code_buffer.cpp ==="
-          grep -n "mprotect\|mmap\|Allocate\|Initialize\|guard\|PROT_EXEC\|__FreeBSD__\|__x86_64__" src/common/jit_code_buffer.cpp | cut -c1-170 || true
-          echo "=== jit_code_buffer.h ==="
-          grep -n "Allocate\|Initialize\|guard\|m_owns_buffer" src/common/jit_code_buffer.h | cut -c1-170 || true
-          echo "=== tamanos ==="
-          grep -rn "define RECOMPILER_CODE_CACHE_SIZE\|define RECOMPILER_FAR_CODE_CACHE_SIZE\|define RECOMPILER_GUARD_SIZE\|RECOMPILER_GUARD_SIZE =\|RECOMPILER_CODE_CACHE_SIZE =\|RECOMPILER_FAR_CODE_CACHE_SIZE =" src | cut -c1-170 || true
-          cd ..
-          mkdir -p fuentes
-          cp swan/src/core/cpu_code_cache.cpp swan/src/common/jit_code_buffer.cpp swan/src/common/jit_code_buffer.h fuentes/
-          ls -la fuentes
-      - name: Guardar fuentes para revisar
-        uses: actions/upload-artifact@v4
-        with:
-          name: swan-fuentes
-          path: fuentes/
+          cat > parche_jit.py << 'EOF'
+          import sys
+          ruta = 'swan/src/core/cpu_code_cache.cpp'
+          pares = [
+            ('static constexpr uint32_t RECOMPILER_CODE_CACHE_SIZE = 32 * 1024 * 1024;',
+             'static constexpr uint32_t RECOMPILER_CODE_CACHE_SIZE = 16 * 1024 * 1024;'),
+            ('static constexpr uint32_t RECOMPILER_FAR_CODE_CACHE_SIZE = 16 * 1024 * 1024;',
+             'static constexpr uint32_t RECOMPILER_FAR_CODE_CACHE_SIZE = 8 * 1024 * 1024;'),
+            ('static constexpr uint32_t RECOMPILER_GUARD_SIZE = 4096;',
+             'static constexpr uint32_t RECOMPILER_GUARD_SIZE = 0;'),
+            ('alignas(Recompiler::CODE_STORAGE_ALIGNMENT) static uint8_t',
+             'alignas(16384) static uint8_t'),
+          ]
+          s = open(ruta).read()
+          for viejo, nuevo in pares:
+              n = s.count(viejo)
+              if n != 1:
+                  print('PARCHE_FALLA (veces encontrado: %d): %s' % (n, viejo[:70]))
+                  print('NO SE APLICA NINGUN PARCHE; se compila sin cambios')
+                  sys.exit(0)
+          for viejo, nuevo in pares:
+              s = s.replace(viejo, nuevo)
+          open(ruta, 'w').write(s)
+          print('PARCHES_APLICADOS')
+          EOF
+          python3 parche_jit.py
+          echo "=== lineas parcheadas ==="
+          grep -n "RECOMPILER_CODE_CACHE_SIZE =\|RECOMPILER_FAR_CODE_CACHE_SIZE =\|RECOMPILER_GUARD_SIZE =\|alignas(" swan/src/core/cpu_code_cache.cpp | cut -c1-150
       - name: Compilar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
