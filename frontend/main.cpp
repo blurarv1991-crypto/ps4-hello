@@ -641,6 +641,51 @@ static void dibujar(void) {
   SDL_RenderPresent(R);
 }
 
+/* ---- Suavizado de imagen (0 = No, 1 = Bajo, 2 = Alto) ----
+   Bajo: interpolacion "nitida" solo en horizontal (arregla los pixeles de distinto ancho del 4:3);
+         en vertical el factor ya es entero, asi que no hace falta mezclar.
+   Alto: bordes mas suaves (mezcla el doble de ancha) en horizontal y vertical. */
+static int g_suav = 0;
+static uint16_t g_hbuf[1920 * 576];
+static int g_hi0[1920], g_hi1[1920];
+static unsigned char g_hw[1920];
+static int g_h_w = 0, g_h_W = 0, g_h_s = -1;
+static int g_vi0[1080], g_vi1[1080];
+static unsigned char g_vw[1080];
+static int g_v_h = 0, g_v_H = 0, g_v_s = -1;
+
+/* Tabla para pasar de n pixeles a N: indice i0, indice i1 y peso (0..32) de i1.
+   nitido=0: vecino mas cercano. 1: bilineal nitido. 2: bilineal suave (borde mas ancho). */
+static void suav_tabla(int n, int N, int nitido, int *i0, int *i1, unsigned char *wt) {
+  for (int o = 0; o < N; o++) {
+    if (!nitido) {
+      int a = (int)(((long long)o * n) / N);
+      if (a > n - 1) a = n - 1;
+      i0[o] = a; i1[o] = a; wt[o] = 0;
+      continue;
+    }
+    float u = ((float)o + 0.5f) * (float)n / (float)N - 0.5f;
+    if (u <= 0.0f) { i0[o] = 0; i1[o] = 0; wt[o] = 0; continue; }
+    int a = (int)u;
+    if (a >= n - 1) { i0[o] = n - 1; i1[o] = n - 1; wt[o] = 0; continue; }
+    float f = u - (float)a;
+    float sc = (float)N / (float)n;
+    if (nitido == 2) { sc *= 0.5f; if (sc < 1.0f) sc = 1.0f; }
+    float fp = (f - 0.5f) * sc + 0.5f;
+    if (fp < 0.0f) fp = 0.0f;
+    if (fp > 1.0f) fp = 1.0f;
+    i0[o] = a; i1[o] = a + 1; wt[o] = (unsigned char)(fp * 32.0f + 0.5f);
+  }
+}
+
+/* Mezcla dos pixeles de 16 bits con peso w (0..32) de b. m: mascara RGB565 o 1555 */
+static inline uint16_t mezcla(uint16_t a, uint16_t b, unsigned w, uint32_t m) {
+  uint32_t x = ((uint32_t)a | ((uint32_t)a << 16)) & m;
+  uint32_t y = ((uint32_t)b | ((uint32_t)b << 16)) & m;
+  uint32_t r = ((x * (32u - w) + y * w) >> 5) & m;
+  return (uint16_t)(r | (r >> 16));
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
@@ -671,6 +716,41 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     W = w * k;
     H = h * k;
   }
+  int sv = g_suav;
+  if (sv && h <= 576 && W <= 1920 && H <= 1080) {
+    uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
+    if (g_h_w != w || g_h_W != W || g_h_s != sv) {
+      suav_tabla(w, W, sv == 2 ? 2 : 1, g_hi0, g_hi1, g_hw);
+      g_h_w = w;
+      g_h_W = W;
+      g_h_s = sv;
+    }
+    if (g_v_h != h || g_v_H != H || g_v_s != sv) {
+      suav_tabla(h, H, sv == 2 ? 2 : 0, g_vi0, g_vi1, g_vw);
+      g_v_h = h;
+      g_v_H = H;
+      g_v_s = sv;
+    }
+    for (int y = 0; y < h; y++) {
+      const uint16_t *s = g_snap + (size_t)y * (size_t)w;
+      uint16_t *d = g_hbuf + (size_t)y * W;
+      for (int x = 0; x < W; x++) {
+        unsigned wt = g_hw[x];
+        d[x] = wt ? mezcla(s[g_hi0[x]], s[g_hi1[x]], wt, m) : s[g_hi0[x]];
+      }
+    }
+    for (int oy = 0; oy < H; oy++) {
+      uint16_t *d = g_sbuf + (size_t)oy * W;
+      const uint16_t *r0 = g_hbuf + (size_t)g_vi0[oy] * W;
+      unsigned wt = g_vw[oy];
+      if (!wt) {
+        memcpy(d, r0, (size_t)W * 2);
+      } else {
+        const uint16_t *r1 = g_hbuf + (size_t)g_vi1[oy] * W;
+        for (int x = 0; x < W; x++) d[x] = mezcla(r0[x], r1[x], wt, m);
+      }
+    }
+  } else {
   if (g_xmap_w != w || g_xmap_W != W) {
     for (int x = 0; x < W; x++) g_xmap[x] = (int)(((long long)x * w) / W);
     g_xmap_w = w;
@@ -681,6 +761,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     uint16_t *d = g_sbuf + (size_t)(y * k) * W;
     for (int x = 0; x < W; x++) d[x] = s[g_xmap[x]];
     for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
+  }
   }
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
@@ -1082,6 +1163,14 @@ static void jit_conmutar(void) {
   snprintf(g_msg, sizeof(g_msg), "JIT %s: reinicia la app para aplicarlo", g_jit_pedido ? "activado" : "desactivado");
 }
 
+static void suav_cambiar(int d) {
+  g_suav = (g_suav + d + 3) % 3;
+  FILE *f = fopen("/data/swan/suav.txt", "wb");
+  if (f) { fputc('0' + g_suav, f); fclose(f); }
+  esp("MENU: suavizado = %d", g_suav);
+  snprintf(g_msg, sizeof(g_msg), "Suavizado cambiado (no aplica con escala Original)");
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -1089,9 +1178,11 @@ static void menu_refrescar(void) {
   snprintf(g_ml[2], sizeof(g_ml[2]), "Ranura: %d  (izq/der)", g_ranura);
   snprintf(g_ml[3], sizeof(g_ml[3]), "Escala: %s  (izq/der)", esc[g_modo & 3]);
   snprintf(g_ml[4], sizeof(g_ml[4]), "Aspecto: %s", g_asp ? "4:3" : "Cuadrado");
-  snprintf(g_ml[5], sizeof(g_ml[5]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
-  snprintf(g_ml[6], sizeof(g_ml[6]), "Continuar");
-  g_menu_n = 7;
+  const char *sv[3] = {"No", "Bajo", "Alto"};
+  snprintf(g_ml[5], sizeof(g_ml[5]), "Suavizado: %s  (izq/der)", sv[g_suav % 3]);
+  snprintf(g_ml[6], sizeof(g_ml[6]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
+  snprintf(g_ml[7], sizeof(g_ml[7]), "Continuar");
+  g_menu_n = 8;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -1127,7 +1218,8 @@ static void pausa_menu(void) {
       if (g_menu_sel == 2) g_ranura = ((g_ranura - 1 + dx + 4) % 4) + 1;
       else if (g_menu_sel == 3) g_modo = (g_modo + dx + 4) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
-      else if (g_menu_sel == 5) jit_conmutar();
+      else if (g_menu_sel == 5) suav_cambiar(dx);
+      else if (g_menu_sel == 6) jit_conmutar();
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -1136,8 +1228,9 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 2) g_ranura = (g_ranura % 4) + 1;
       else if (g_menu_sel == 3) g_modo = (g_modo + 1) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
-      else if (g_menu_sel == 5) jit_conmutar();
-      else if (g_menu_sel == 6) salir = 1;
+      else if (g_menu_sel == 5) suav_cambiar(1);
+      else if (g_menu_sel == 6) jit_conmutar();
+      else if (g_menu_sel == 7) salir = 1;
     }
     menu_refrescar();
     if (salir) break;
@@ -1330,6 +1423,15 @@ int main(void) {
   int quiere_hilo = existe("/data/swan/sin_hilo.txt") ? 0 : 1;
   /* Con /data/swan/sin_aspecto.txt se arranca con pixeles cuadrados */
   if (existe("/data/swan/sin_aspecto.txt")) g_asp = 0;
+  {
+    FILE *fs = fopen("/data/swan/suav.txt", "rb");
+    if (fs) {
+      int c = fgetc(fs);
+      fclose(fs);
+      if (c >= '0' && c <= '2') g_suav = c - '0';
+    }
+    esp("SUAVIZADO inicial=%d", g_suav);
+  }
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
     SDL_Thread *td = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
