@@ -24,36 +24,6 @@ jobs:
           mkdir -p swan/dep/stub
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
-      - name: Parchear JIT (buffer de codigo de 16 KiB, sin guardas)
-        run: |
-          cat > parche_jit.py << 'EOF'
-          import sys
-          ruta = 'swan/src/core/cpu_code_cache.cpp'
-          pares = [
-            ('static constexpr uint32_t RECOMPILER_CODE_CACHE_SIZE = 32 * 1024 * 1024;',
-             'static constexpr uint32_t RECOMPILER_CODE_CACHE_SIZE = 16 * 1024 * 1024;'),
-            ('static constexpr uint32_t RECOMPILER_FAR_CODE_CACHE_SIZE = 16 * 1024 * 1024;',
-             'static constexpr uint32_t RECOMPILER_FAR_CODE_CACHE_SIZE = 8 * 1024 * 1024;'),
-            ('static constexpr uint32_t RECOMPILER_GUARD_SIZE = 4096;',
-             'static constexpr uint32_t RECOMPILER_GUARD_SIZE = 0;'),
-            ('alignas(Recompiler::CODE_STORAGE_ALIGNMENT) static uint8_t',
-             'alignas(16384) static uint8_t'),
-          ]
-          s = open(ruta).read()
-          for viejo, nuevo in pares:
-              n = s.count(viejo)
-              if n != 1:
-                  print('PARCHE_FALLA (veces encontrado: %d): %s' % (n, viejo[:70]))
-                  print('NO SE APLICA NINGUN PARCHE; se compila sin cambios')
-                  sys.exit(0)
-          for viejo, nuevo in pares:
-              s = s.replace(viejo, nuevo)
-          open(ruta, 'w').write(s)
-          print('PARCHES_APLICADOS')
-          EOF
-          python3 parche_jit.py
-          echo "=== lineas parcheadas ==="
-          grep -n "RECOMPILER_CODE_CACHE_SIZE =\|RECOMPILER_FAR_CODE_CACHE_SIZE =\|RECOMPILER_GUARD_SIZE =\|alignas(" swan/src/core/cpu_code_cache.cpp | cut -c1-150
       - name: Compilar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
