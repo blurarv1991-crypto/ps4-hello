@@ -15,6 +15,22 @@ extern "C" {
 #include <orbis/Pad.h>
 }
 #include "stb_easy_font.h"
+#include <stdlib.h>
+/* Portadas: solo se activan si el archivo stb_image.h esta junto a main.cpp */
+#if defined(__has_include)
+#if __has_include("stb_image.h")
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#define STBI_NO_SIMD
+#define STBI_NO_FAILURE_STRINGS
+#define STBI_ASSERT(x) ((void)0)
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define HAY_STBI 1
+#endif
+#endif
 
 /* Audio: declaraciones propias enlazadas a los simbolos reales de la PS4 */
 extern "C" {
@@ -1229,37 +1245,369 @@ static int listar_juegos(void) {
   return g_nj;
 }
 
-static void dibujar_menu(int sel, int top) {
-  SDL_SetRenderDrawColor(R, 0, 0, 80, 255);
-  SDL_RenderClear(R);
-  SDL_RenderSetScale(R, 2, 2);
-  char t[200];
-  snprintf(t, sizeof(t), "SwanStation PS4 - elige un juego (%d)", g_nj);
-  texto(10, 10, t);
-  texto(10, 26, "Arriba/Abajo: mover     X: jugar");
-  float y = 52;
-  const int VISIBLES = 28;
-  if (top > 0) {
-    texto(10, y, "   ...");
+#ifdef HAY_STBI
+/* ---- Portadas (PNG de EmuSuNi): se buscan por el nombre del juego ---- */
+#define CARPETA_PORTADAS "/data/EmuSuNi/covers/ps1"
+#define MAX_PORTADAS 600
+typedef struct {
+  char arch[128];
+  char clave[96];
+} Portada;
+static Portada *g_cov = NULL;
+static int g_ncov = 0;
+static SDL_Texture *g_cov_tex = NULL;
+static int g_cov_w = 0, g_cov_h = 0;
+static int g_cov_idx = -1;   /* juego cuya portada esta en g_cov_tex */
+static int g_cov_pend = -2;  /* ultimo juego visto en la seleccion */
+static unsigned g_cov_t = 0; /* momento en que la seleccion cambio */
+static int g_cov_hay = -1;   /* indice de portada que le toca al juego seleccionado (-1 = ninguna) */
+static int g_cov_listadas = 0;
+
+/* minusculas, solo letras y numeros, sin la extension */
+static void clave_nombre(const char *src, char *dst, size_t n) {
+  size_t len = strlen(src);
+  const char *punto = NULL;
+  for (const char *q = src; *q; q++) {
+    if (*q == '.') punto = q;
   }
-  y += 14;
-  for (int i = top; i < g_nj && i < top + VISIBLES; i++) {
-    char nombre[128];
-    snprintf(nombre, sizeof(nombre), "%.127s", g_jn[i]);
-    char *p = NULL;
-    for (char *q = nombre; *q; q++) {
-      if (*q == '.') p = q;
+  if (punto && (size_t)(len - (size_t)(punto - src)) <= 5) len = (size_t)(punto - src);
+  size_t k = 0;
+  for (size_t i = 0; i < len && k + 1 < n; i++) {
+    char c = src[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) dst[k++] = c;
+  }
+  dst[k] = 0;
+}
+
+static void listar_portadas(void) {
+  g_cov_listadas = 1;
+  g_ncov = 0;
+  if (!g_cov) g_cov = (Portada *)calloc(MAX_PORTADAS, sizeof(Portada));
+  if (!g_cov) return;
+  int fd = mia_k_open(CARPETA_PORTADAS, 0, 0);
+  esp("PORTADAS carpeta %s open -> %d", CARPETA_PORTADAS, fd);
+  if (fd < 0) return;
+  static char buf[16384];
+  for (;;) {
+    int n = mia_k_getdents(fd, buf, (int)sizeof(buf));
+    if (n <= 0) break;
+    int pos = 0;
+    while (pos + 8 <= n) {
+      uint32_t fileno = 0;
+      uint16_t reclen = 0;
+      memcpy(&fileno, buf + pos, 4);
+      memcpy(&reclen, buf + pos + 4, 2);
+      unsigned tipo = (unsigned char)buf[pos + 6];
+      unsigned namlen = (unsigned char)buf[pos + 7];
+      const char *nm = buf + pos + 8;
+      if (reclen < 8 || pos + (int)reclen > n) break;
+      if (fileno != 0 && tipo != 4 && namlen > 4 && namlen < 128 && nm[0] != '.' && g_ncov < MAX_PORTADAS) {
+        char tmp[128];
+        memcpy(tmp, nm, namlen);
+        tmp[namlen] = 0;
+        if (!cmp_ci(extension(tmp), "png")) {
+          snprintf(g_cov[g_ncov].arch, sizeof(g_cov[0].arch), "%s", tmp);
+          clave_nombre(tmp, g_cov[g_ncov].clave, sizeof(g_cov[0].clave));
+          if (g_cov[g_ncov].clave[0]) g_ncov++;
+        }
+      }
+      pos += reclen;
     }
-    if (p) *p = 0;
-    snprintf(t, sizeof(t), "%s %.90s", (i == sel) ? ">" : " ", nombre);
-    texto(10, y, t);
-    y += 14;
   }
-  if (top + VISIBLES < g_nj) texto(10, y, "   ...");
+  mia_k_close(fd);
+  esp("PORTADAS png encontrados=%d", g_ncov);
+}
+
+/* Portada que le toca a un juego: nombre igual; si no, la mas larga contenida en el nombre; si no, la mas corta que lo contiene */
+static int buscar_portada(const char *juego) {
+  char kj[96];
+  clave_nombre(juego, kj, sizeof(kj));
+  size_t lj = strlen(kj);
+  if (!lj) return -1;
+  int mejor = -1;
+  size_t lmejor = 0;
+  for (int i = 0; i < g_ncov; i++) {
+    if (!strcmp(g_cov[i].clave, kj)) return i;
+  }
+  for (int i = 0; i < g_ncov; i++) {
+    size_t lc = strlen(g_cov[i].clave);
+    if (lc >= 5 && lc < lj && strstr(kj, g_cov[i].clave) && lc > lmejor) {
+      mejor = i;
+      lmejor = lc;
+    }
+  }
+  if (mejor >= 0) return mejor;
+  size_t corto = 1000;
+  for (int i = 0; i < g_ncov; i++) {
+    size_t lc = strlen(g_cov[i].clave);
+    if (lj >= 5 && lc > lj && strstr(g_cov[i].clave, kj) && lc < corto) {
+      mejor = i;
+      corto = lc;
+    }
+  }
+  return mejor;
+}
+
+static void portada_liberar(void) {
+  if (g_cov_tex) SDL_DestroyTexture(g_cov_tex);
+  g_cov_tex = NULL;
+  g_cov_idx = -1;
+}
+
+/* Carga la portada ci, reducida para que quepa en maxw x maxh (media por bloques) */
+static void cargar_portada(int juego, int ci, int maxw, int maxh) {
+  portada_liberar();
+  g_cov_idx = juego; /* aunque falle, no se reintenta hasta cambiar de juego */
+  if (ci < 0 || ci >= g_ncov) return;
+  char ruta[300];
+  snprintf(ruta, sizeof(ruta), "%s/%s", CARPETA_PORTADAS, g_cov[ci].arch);
+  FILE *f = fopen(ruta, "rb");
+  if (!f) { esp("PORTADAS no abre %s", ruta); return; }
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz <= 8 || sz > 12 * 1024 * 1024) { fclose(f); esp("PORTADAS tamano raro %ld (%s)", sz, ruta); return; }
+  unsigned char *datos = (unsigned char *)malloc((size_t)sz);
+  if (!datos) { fclose(f); return; }
+  size_t rd = fread(datos, 1, (size_t)sz, f);
+  fclose(f);
+  int w = 0, h = 0, ch = 0;
+  unsigned char *px = (rd == (size_t)sz) ? stbi_load_from_memory(datos, (int)sz, &w, &h, &ch, 4) : NULL;
+  free(datos);
+  if (!px || w <= 0 || h <= 0 || (long long)w * h > 16000000LL) {
+    esp("PORTADAS no se pudo leer el PNG %s", ruta);
+    if (px) stbi_image_free(px);
+    return;
+  }
+  int tw = w, th = h;
+  if (tw > maxw || th > maxh) {
+    long long a = (long long)maxw * h, b = (long long)maxh * w; /* compara proporciones */
+    if (a <= b) { tw = maxw; th = (int)(((long long)h * maxw) / w); }
+    else { th = maxh; tw = (int)(((long long)w * maxh) / h); }
+  }
+  if (tw < 1) tw = 1;
+  if (th < 1) th = 1;
+  unsigned char *dst = (unsigned char *)malloc((size_t)tw * th * 4);
+  if (dst) {
+    for (int y = 0; y < th; y++) {
+      int y0 = (int)(((long long)y * h) / th), y1 = (int)(((long long)(y + 1) * h) / th);
+      if (y1 <= y0) y1 = y0 + 1;
+      for (int x = 0; x < tw; x++) {
+        int x0 = (int)(((long long)x * w) / tw), x1 = (int)(((long long)(x + 1) * w) / tw);
+        if (x1 <= x0) x1 = x0 + 1;
+        unsigned s[4] = {0, 0, 0, 0};
+        for (int yy = y0; yy < y1; yy++) {
+          const unsigned char *p = px + ((size_t)yy * w + x0) * 4;
+          for (int xx = x0; xx < x1; xx++, p += 4) {
+            s[0] += p[0]; s[1] += p[1]; s[2] += p[2]; s[3] += p[3];
+          }
+        }
+        unsigned cnt = (unsigned)((y1 - y0) * (x1 - x0));
+        unsigned char *o = dst + ((size_t)y * tw + x) * 4;
+        o[0] = (unsigned char)(s[0] / cnt); o[1] = (unsigned char)(s[1] / cnt);
+        o[2] = (unsigned char)(s[2] / cnt); o[3] = (unsigned char)(s[3] / cnt);
+      }
+    }
+    g_cov_tex = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, tw, th);
+    if (g_cov_tex) {
+      SDL_UpdateTexture(g_cov_tex, NULL, dst, tw * 4);
+      SDL_SetTextureBlendMode(g_cov_tex, SDL_BLENDMODE_BLEND);
+      g_cov_w = tw;
+      g_cov_h = th;
+    } else {
+      esp("PORTADAS no se pudo crear la textura %dx%d", tw, th);
+    }
+    free(dst);
+  }
+  stbi_image_free(px);
+  esp("PORTADAS cargada %s (%dx%d -> %dx%d)", g_cov[ci].arch, w, h, tw, th);
+}
+
+/* Llamar en cada dibujo del menu: decide si hay portada y la carga cuando la seleccion lleva un rato quieta */
+static void portada_actualizar(int sel, int maxw, int maxh) {
+  if (!g_cov_listadas) listar_portadas();
+  unsigned ahora = SDL_GetTicks();
+  if (sel != g_cov_pend) {
+    g_cov_pend = sel;
+    g_cov_t = ahora;
+    g_cov_hay = (sel >= 0 && sel < g_nj) ? buscar_portada(g_jn[sel]) : -1;
+  }
+  if (g_cov_hay >= 0 && sel != g_cov_idx && ahora - g_cov_t > 250) cargar_portada(sel, g_cov_hay, maxw, maxh);
+}
+#endif
+
+/* ---- Menu de juegos (pantalla de inicio) ---- */
+#define MENU_VIS 12   /* filas visibles de la lista */
+#define MENU_FILA 60  /* alto de cada fila, en pixeles */
+
+/* Texto con escala y color propios. x, y en pixeles de pantalla (1920x1080). */
+static void texto_col(float x, float y, int esc, int r, int g, int b, const char *s) {
+  static char buf[60000];
+  char limpio[200];
+  size_t n = 0;
+  for (; s[n] && n < sizeof(limpio) - 1; n++) {
+    unsigned char c = (unsigned char)s[n];
+    limpio[n] = (c >= 32 && c <= 126) ? (char)c : '?';
+  }
+  limpio[n] = 0;
+  SDL_RenderSetScale(R, (float)esc, (float)esc);
+  int nq = stb_easy_font_print(x / esc, y / esc, limpio, NULL, buf, sizeof(buf));
+  SDL_SetRenderDrawColor(R, (Uint8)r, (Uint8)g, (Uint8)b, 255);
+  for (int i = 0; i < nq; i++) {
+    float *v = (float *)(buf + i * 64);
+    SDL_Rect q = {(int)v[0], (int)v[1], (int)(v[8] - v[0]), (int)(v[9] - v[1])};
+    SDL_RenderFillRect(R, &q);
+  }
+  SDL_RenderSetScale(R, 1, 1);
+}
+
+/* Rectangulo con esquinas redondeadas (radio c), color y transparencia */
+static void panel(int x, int y, int w, int h, int c, int r, int g, int b, int a) {
+  SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(R, (Uint8)r, (Uint8)g, (Uint8)b, (Uint8)a);
+  if (c * 2 > h) c = h / 2;
+  if (c * 2 > w) c = w / 2;
+  SDL_Rect mid = {x, y + c, w, h - 2 * c};
+  SDL_RenderFillRect(R, &mid);
+  for (int i = 0; i < c; i++) {
+    int dy = 2 * (c - i) - 1; /* distancia al centro de la esquina, por dos */
+    int lim = 4 * c * c - dy * dy;
+    int raiz = 0;
+    while ((raiz + 1) * (raiz + 1) <= lim) raiz++; /* raiz entera de lim */
+    int inset = c - raiz / 2;
+    if (inset < 0) inset = 0;
+    SDL_Rect up = {x + inset, y + i, w - 2 * inset, 1};
+    SDL_Rect dn = {x + inset, y + h - 1 - i, w - 2 * inset, 1};
+    SDL_RenderFillRect(R, &up);
+    SDL_RenderFillRect(R, &dn);
+  }
+  SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
+}
+
+static void nombre_bonito(const char *src, char *dst, size_t n, size_t maxc) {
+  snprintf(dst, n, "%.127s", src);
+  char *p = NULL;
+  for (char *q = dst; *q; q++) {
+    if (*q == '.') p = q;
+  }
+  if (p) *p = 0;
+  for (char *q = dst; *q; q++) {
+    if (*q == '_') *q = ' ';
+  }
+  if (strlen(dst) > maxc) {
+    dst[maxc - 3] = '.';
+    dst[maxc - 2] = '.';
+    dst[maxc - 1] = '.';
+    dst[maxc] = 0;
+  }
+}
+
+static void dibujar_menu(int sel, int top) {
+  SDL_RenderSetScale(R, 1, 1);
+  /* fondo con degradado vertical */
+  for (int i = 0; i < 54; i++) {
+    int r = 14 + i * 22 / 54, g = 16 + i * 6 / 54, b = 52 + i * 44 / 54;
+    SDL_SetRenderDrawColor(R, (Uint8)r, (Uint8)g, (Uint8)b, 255);
+    SDL_Rect f = {0, i * 20, 1920, 20};
+    SDL_RenderFillRect(R, &f);
+  }
+  /* cabecera */
+  panel(0, 0, 1920, 150, 0, 8, 8, 30, 150);
+  SDL_SetRenderDrawColor(R, 140, 120, 255, 255);
+  SDL_Rect lin = {0, 150, 1920, 4};
+  SDL_RenderFillRect(R, &lin);
+  texto_col(80, 38, 5, 255, 255, 255, "SWANSTATION PS4");
+  char t[200];
+  snprintf(t, sizeof(t), "BIBLIOTECA   %d JUEGOS", g_nj);
+  texto_col(84, 104, 2, 170, 175, 235, t);
+
+  /* lista de juegos */
+  const int LX = 80, LY = 190, LW = 1160;
+  panel(LX - 20, LY - 14, LW + 40, MENU_VIS * MENU_FILA + 28, 14, 10, 10, 40, 170);
+  for (int k = 0; k < MENU_VIS; k++) {
+    int i = top + k;
+    if (i >= g_nj) break;
+    int y = LY + k * MENU_FILA;
+    char nombre[128];
+    nombre_bonito(g_jn[i], nombre, sizeof(nombre), 52);
+    if (i == sel) {
+      panel(LX, y, LW, MENU_FILA - 6, 14, 120, 100, 255, 255);
+      texto_col(LX + 28, y + 17, 3, 255, 255, 255, nombre);
+    } else {
+      texto_col(LX + 28, y + 17, 3, 175, 180, 220, nombre);
+    }
+  }
+  /* barra de desplazamiento */
+  if (g_nj > MENU_VIS) {
+    int th = MENU_VIS * MENU_FILA;
+    panel(LX + LW + 40, LY, 10, th, 4, 255, 255, 255, 40);
+    int hh = th * MENU_VIS / g_nj;
+    if (hh < 40) hh = 40;
+    int py = LY + (th - hh) * top / (g_nj - MENU_VIS);
+    panel(LX + LW + 40, py, 10, hh, 4, 140, 120, 255, 255);
+  }
+
+  /* tarjeta del juego seleccionado */
+  const int CX = 1330, CY = 190, CW = 510;
+  int con_cov = 0;
+#ifdef HAY_STBI
+  portada_actualizar(sel, 450, 320);
+  con_cov = (g_cov_hay >= 0);
+#endif
+  const int off = con_cov ? 350 : 0; /* espacio para la portada */
+  panel(CX, CY, CW, 400 + off, 18, 10, 10, 40, 170);
+  texto_col(CX + 30, CY + 28, 2, 140, 130, 255, "JUEGO SELECCIONADO");
+#ifdef HAY_STBI
+  if (con_cov) {
+    if (g_cov_tex && g_cov_idx == sel) {
+      SDL_Rect dp = {CX + 30 + (450 - g_cov_w) / 2, CY + 64 + (320 - g_cov_h) / 2, g_cov_w, g_cov_h};
+      SDL_RenderCopy(R, g_cov_tex, NULL, &dp);
+    } else {
+      panel(CX + 30, CY + 64, 450, 320, 14, 255, 255, 255, 25); /* hueco mientras carga */
+    }
+  }
+#endif
+  char full[128];
+  nombre_bonito(g_jn[sel], full, sizeof(full), 120);
+  /* se parte el nombre en lineas de unos 24 letras (por palabras) */
+  {
+    char linea[40];
+    int ln = 0, y = CY + 90 + off, lineas = 0;
+    const char *p = full;
+    while (*p && lineas < 5) {
+      const char *fin = p;
+      const char *ult_esp = NULL;
+      int cnt = 0;
+      while (*fin && cnt < 24) {
+        if (*fin == ' ') ult_esp = fin;
+        fin++;
+        cnt++;
+      }
+      if (*fin && ult_esp) fin = ult_esp;
+      ln = (int)(fin - p);
+      if (ln > 38) ln = 38;
+      memcpy(linea, p, (size_t)ln);
+      linea[ln] = 0;
+      texto_col(CX + 30, y, 3, 255, 255, 255, linea);
+      y += 42;
+      lineas++;
+      p = fin;
+      while (*p == ' ') p++;
+    }
+  }
+  snprintf(t, sizeof(t), "%d DE %d", sel + 1, g_nj);
+  texto_col(CX + 30, CY + 340 + off, 2, 170, 175, 235, t);
+
+  /* pie con los botones */
+  panel(0, 960, 1920, 120, 0, 8, 8, 30, 150);
+  panel(80, 1000, 70, 40, 12, 120, 100, 255, 255);
+  texto_col(94, 1010, 3, 255, 255, 255, "X");
+  texto_col(170, 1010, 3, 255, 255, 255, "JUGAR");
+  texto_col(430, 1010, 3, 175, 180, 220, "ARRIBA / ABAJO: MOVER");
   SDL_RenderPresent(R);
 }
 
-/* Muestra el menu y devuelve 1 con la ruta elegida en out; 0 si no hay juegos en la carpeta */
 static int elegir_juego(char *out, size_t outn) {
   int n = listar_juegos();
   if (n <= 0) return 0;
@@ -1318,7 +1666,7 @@ static int elegir_juego(char *out, size_t outn) {
       prev = b;
       if (nuevos & PB_CROSS) break;
       if (sel < top) top = sel;
-      if (sel >= top + 28) top = sel - 27;
+      if (sel >= top + MENU_VIS) top = sel - (MENU_VIS - 1);
       dibujar_menu(sel, top);
       SDL_Delay(16);
     }
@@ -1331,6 +1679,12 @@ static int elegir_juego(char *out, size_t outn) {
     fclose(f);
   }
   esp("MENU elegido (%d de %d): %s", sel + 1, n, out);
+#ifdef HAY_STBI
+  portada_liberar();
+  free(g_cov);
+  g_cov = NULL;
+  g_ncov = 0;
+#endif
   return 1;
 }
 
