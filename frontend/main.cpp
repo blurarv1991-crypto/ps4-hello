@@ -199,7 +199,7 @@ static int g_xmap_w = 0, g_xmap_W = 0;
 static volatile int g_menu_toggle = 0;
 static volatile int g_menu_vis = 0;
 static int g_menu_sel = 0, g_menu_n = 0;
-static char g_ml[10][72];
+static char g_ml[12][72];
 static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
@@ -856,6 +856,50 @@ static const uint16_t *aa_aplicar(int w, int h, int W, int H, int nivel_aa, int 
   return cur;
 }
 
+/* ---- Scale2x (AdvMAME2x): duplica la imagen (2w x 2h) redibujando diagonales segun los vecinos ----
+   Pensado para juegos 2D con colores planos. Si esta activo, sustituye a Bordes y Nitidez. */
+static int g_s2x = 0;
+
+static void scale2x_filtrar(const uint16_t *src, uint16_t *dst, int w, int h) {
+  const int W2 = w * 2;
+  for (int y = 0; y < h; y++) {
+    const uint16_t *rc = src + (size_t)y * w;
+    const uint16_t *rn = src + (size_t)(y > 0 ? y - 1 : 0) * w;
+    const uint16_t *rs = src + (size_t)(y < h - 1 ? y + 1 : h - 1) * w;
+    uint16_t *d0 = dst + (size_t)(2 * y) * W2;
+    uint16_t *d1 = d0 + W2;
+    for (int x = 0; x < w; x++) {
+      int xl = x > 0 ? x - 1 : 0, xr = x < w - 1 ? x + 1 : w - 1;
+      uint16_t E = rc[x], B = rn[x], Hh = rs[x], D = rc[xl], F = rc[xr];
+      uint16_t e0 = E, e1 = E, e2 = E, e3 = E;
+      if (B != Hh && D != F) {
+        e0 = (D == B) ? D : E;
+        e1 = (B == F) ? F : E;
+        e2 = (D == Hh) ? D : E;
+        e3 = (Hh == F) ? F : E;
+      }
+      d0[2 * x] = e0; d0[2 * x + 1] = e1;
+      d1[2 * x] = e2; d1[2 * x + 1] = e3;
+    }
+  }
+}
+
+/* Elige la imagen que se va a estirar y sus medidas (sw x sh) */
+static const uint16_t *pre_aplicar(int w, int h, int W, int H, int *sw, int *sh) {
+  if (g_s2x && w >= 8 && h >= 8) {
+    size_t total = (size_t)1920 * 1080;
+    size_t wh = (size_t)w * (size_t)h;
+    if (4 * wh + (size_t)W * (size_t)H <= total) {
+      uint16_t *dst = g_sbuf + (total - 4 * wh);
+      scale2x_filtrar(g_snap, dst, w, h);
+      *sw = 2 * w;
+      *sh = 2 * h;
+      return dst;
+    }
+  }
+  return aa_aplicar(w, h, W, H, g_aa, g_nit);
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
@@ -886,19 +930,20 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     W = w * k;
     H = h * k;
   }
-  const uint16_t *src = aa_aplicar(w, h, W, H, g_aa, g_nit);
+  int sw = w, sh = h;
+  const uint16_t *src = pre_aplicar(w, h, W, H, &sw, &sh);
   int sv = g_suav;
-  if (sv && h <= 576 && W <= 1920 && H <= 1080) {
+  if ((sv || sw != w) && sh <= 1152 && W <= 1920 && H <= 1080) {
     uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
-    if (g_h_w != w || g_h_W != W || g_h_s != sv) {
-      suav_tabla(w, W, sv == 2 ? 2 : 1, g_hi0, g_hi1, g_hw);
-      g_h_w = w;
+    if (g_h_w != sw || g_h_W != W || g_h_s != sv) {
+      suav_tabla(sw, W, sv == 2 ? 2 : (sv ? 1 : 0), g_hi0, g_hi1, g_hw);
+      g_h_w = sw;
       g_h_W = W;
       g_h_s = sv;
     }
-    if (g_v_h != h || g_v_H != H || g_v_s != sv) {
-      suav_tabla(h, H, sv == 2 ? 2 : 0, g_vi0, g_vi1, g_svw);
-      g_v_h = h;
+    if (g_v_h != sh || g_v_H != H || g_v_s != sv) {
+      suav_tabla(sh, H, sv == 2 ? 2 : 0, g_vi0, g_vi1, g_svw);
+      g_v_h = sh;
       g_v_H = H;
       g_v_s = sv;
     }
@@ -912,7 +957,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
         int y = ys[q];
         uint16_t *hr = g_hrow[y & 1];
         if (g_hrow_y[y & 1] != y) {
-          const uint16_t *sr = src + (size_t)y * (size_t)w;
+          const uint16_t *sr = src + (size_t)y * (size_t)sw;
           for (int x = 0; x < W; x++) {
             unsigned wx = g_hw[x];
             hr[x] = wx ? mezcla(sr[g_hi0[x]], sr[g_hi1[x]], wx, m) : sr[g_hi0[x]];
@@ -1004,7 +1049,7 @@ static void dibujar_juego(void) {
     SDL_RenderSetScale(R, 3, 3);
     texto(150, 60, "OPCIONES  (L3 o O: cerrar)");
     int mn = g_menu_n;
-    for (int mi = 0; mi < mn && mi < 10; mi++) {
+    for (int mi = 0; mi < mn && mi < 12; mi++) {
       char ml[90];
       snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
       texto(150, 82 + mi * 18, ml);
@@ -1357,6 +1402,14 @@ static void aa_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Bordes cambiado (no aplica con escala Original)");
 }
 
+static void s2x_cambiar(void) {
+  g_s2x = !g_s2x;
+  FILE *f = fopen("/data/swan/s2x.txt", "wb");
+  if (f) { fputc('0' + g_s2x, f); fclose(f); }
+  esp("MENU: scale2x = %d", g_s2x);
+  snprintf(g_msg, sizeof(g_msg), "Scale2x cambiado (no aplica con escala Original)");
+}
+
 static void nit_cambiar(int d) {
   g_nit = (g_nit + d + 3) % 3;
   FILE *f = fopen("/data/swan/nit.txt", "wb");
@@ -1377,9 +1430,10 @@ static void menu_refrescar(void) {
   const char *bd[3] = {"No", "Suave", "Fuerte"};
   snprintf(g_ml[6], sizeof(g_ml[6]), "Bordes: %s  (izq/der)", bd[g_aa % 3]);
   snprintf(g_ml[7], sizeof(g_ml[7]), "Nitidez: %s  (izq/der)", bd[g_nit % 3]);
-  snprintf(g_ml[8], sizeof(g_ml[8]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
-  snprintf(g_ml[9], sizeof(g_ml[9]), "Continuar");
-  g_menu_n = 10;
+  snprintf(g_ml[8], sizeof(g_ml[8]), g_s2x ? "Scale2x: Si (sin Bordes/Nitidez)" : "Scale2x: No");
+  snprintf(g_ml[9], sizeof(g_ml[9]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
+  snprintf(g_ml[10], sizeof(g_ml[10]), "Continuar");
+  g_menu_n = 11;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -1418,7 +1472,8 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 5) suav_cambiar(dx);
       else if (g_menu_sel == 6) aa_cambiar(dx);
       else if (g_menu_sel == 7) nit_cambiar(dx);
-      else if (g_menu_sel == 8) jit_conmutar();
+      else if (g_menu_sel == 8) s2x_cambiar();
+      else if (g_menu_sel == 9) jit_conmutar();
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -1430,8 +1485,9 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 5) suav_cambiar(1);
       else if (g_menu_sel == 6) aa_cambiar(1);
       else if (g_menu_sel == 7) nit_cambiar(1);
-      else if (g_menu_sel == 8) jit_conmutar();
-      else if (g_menu_sel == 9) salir = 1;
+      else if (g_menu_sel == 8) s2x_cambiar();
+      else if (g_menu_sel == 9) jit_conmutar();
+      else if (g_menu_sel == 10) salir = 1;
     }
     menu_refrescar();
     if (salir) break;
@@ -1646,6 +1702,13 @@ int main(void) {
       if (c >= '0' && c <= '2') g_nit = c - '0';
     }
     esp("NITIDEZ inicial=%d", g_nit);
+    FILE *f2 = fopen("/data/swan/s2x.txt", "rb");
+    if (f2) {
+      int c2 = fgetc(f2);
+      fclose(f2);
+      if (c2 == '0' || c2 == '1') g_s2x = c2 - '0';
+    }
+    esp("SCALE2X inicial=%d", g_s2x);
   }
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
