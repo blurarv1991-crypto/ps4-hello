@@ -350,6 +350,17 @@ int __wrap_mprotect(void *a, size_t l, int pr) {
       unsigned long ri = ini & ~16383UL;
       unsigned long rf = (fin + 16383UL) & ~16383UL;
       esp("JIT mprotect %p +%llu pr=%d -> sceKernelMprotect(%p, %llu, RWX)", a, (unsigned long long)l, pr, (void *)ri, (unsigned long long)(rf - ri));
+      {
+        /* Quien llama: direccion de retorno y palabras de la pila que parecen codigo del ejecutable */
+        unsigned long ref = (unsigned long)(void *)&esp;
+        esp("JIT quien llama: ret=%p ref_esp=%p", __builtin_return_address(0), (void *)ref);
+        unsigned long *sp = (unsigned long *)__builtin_frame_address(0);
+        int hits = 0;
+        for (int i = 0; i < 96 && hits < 24; i++) {
+          unsigned long v = sp[i];
+          if (v >= ref - 0x300000UL && v < ref + 0x600000UL) { esp("JIT pila[%d]=%p", i, (void *)v); hits++; }
+        }
+      }
       int r = mia_k_mprotect((void *)ri, (size_t)(rf - ri), 7);
       esp("JIT sceKernelMprotect = %d (%#x)", r, (unsigned)r);
       if (r == 0) {
