@@ -646,7 +646,8 @@ static void dibujar(void) {
          en vertical el factor ya es entero, asi que no hace falta mezclar.
    Alto: bordes mas suaves (mezcla el doble de ancha) en horizontal y vertical. */
 static int g_suav = 0;
-static uint16_t g_hbuf[1920 * 576];
+static uint16_t g_hrow[2][1920]; /* dos filas ya estiradas (sin buffer grande) */
+static int g_hrow_y[2];
 static int g_hi0[1920], g_hi1[1920];
 static unsigned char g_hw[1920];
 static int g_h_w = 0, g_h_W = 0, g_h_s = -1;
@@ -731,23 +732,30 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
       g_v_H = H;
       g_v_s = sv;
     }
-    for (int y = 0; y < h; y++) {
-      const uint16_t *s = g_snap + (size_t)y * (size_t)w;
-      uint16_t *d = g_hbuf + (size_t)y * W;
-      for (int x = 0; x < W; x++) {
-        unsigned wt = g_hw[x];
-        d[x] = wt ? mezcla(s[g_hi0[x]], s[g_hi1[x]], wt, m) : s[g_hi0[x]];
-      }
-    }
+    g_hrow_y[0] = -1;
+    g_hrow_y[1] = -1;
     for (int oy = 0; oy < H; oy++) {
       uint16_t *d = g_sbuf + (size_t)oy * W;
-      const uint16_t *r0 = g_hbuf + (size_t)g_vi0[oy] * W;
+      const uint16_t *r[2];
+      int ys[2] = {g_vi0[oy], g_vi1[oy]};
+      for (int q = 0; q < 2; q++) {
+        int y = ys[q];
+        uint16_t *hr = g_hrow[y & 1];
+        if (g_hrow_y[y & 1] != y) {
+          const uint16_t *sr = g_snap + (size_t)y * (size_t)w;
+          for (int x = 0; x < W; x++) {
+            unsigned wx = g_hw[x];
+            hr[x] = wx ? mezcla(sr[g_hi0[x]], sr[g_hi1[x]], wx, m) : sr[g_hi0[x]];
+          }
+          g_hrow_y[y & 1] = y;
+        }
+        r[q] = hr;
+      }
       unsigned wt = g_svw[oy];
       if (!wt) {
-        memcpy(d, r0, (size_t)W * 2);
+        memcpy(d, r[0], (size_t)W * 2);
       } else {
-        const uint16_t *r1 = g_hbuf + (size_t)g_vi1[oy] * W;
-        for (int x = 0; x < W; x++) d[x] = mezcla(r0[x], r1[x], wt, m);
+        for (int x = 0; x < W; x++) d[x] = mezcla(r[0][x], r[1][x], wt, m);
       }
     }
   } else {
