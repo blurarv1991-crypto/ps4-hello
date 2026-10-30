@@ -24,11 +24,12 @@ jobs:
           mkdir -p swan/dep/stub
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
-      - name: Parchear JIT (tamanos y sin guardas)
+      - name: Parchear JIT (tamanos, sin guardas, rama de memoria forzada y registro)
         run: |
           cat > parche_jit.py << 'EOF'
           import sys
           ruta = 'swan/src/core/cpu_code_cache.cpp'
+          ruta2 = 'swan/src/common/jit_code_buffer.cpp'
           pares = [
             ('static constexpr uint32_t RECOMPILER_CODE_CACHE_SIZE = 32 * 1024 * 1024;',
              'static constexpr uint32_t RECOMPILER_CODE_CACHE_SIZE = 16 * 1024 * 1024;'),
@@ -36,22 +37,38 @@ jobs:
              'static constexpr uint32_t RECOMPILER_FAR_CODE_CACHE_SIZE = 8 * 1024 * 1024;'),
             ('static constexpr uint32_t RECOMPILER_GUARD_SIZE = 4096;',
              'static constexpr uint32_t RECOMPILER_GUARD_SIZE = 0;'),
+            ('if (!has_buffer && !s_code_buffer.Allocate(RECOMPILER_CODE_CACHE_SIZE, RECOMPILER_FAR_CODE_CACHE_SIZE)) { }',
+             'if (!has_buffer && !s_code_buffer.Allocate(RECOMPILER_CODE_CACHE_SIZE, RECOMPILER_FAR_CODE_CACHE_SIZE)) { }\n'
+             '    { FILE* lf = fopen("/data/swan/jit_core.txt", "a"); if (lf) { fprintf(lf, "Initialize: has_buffer=%d ptr=%p libre=%u lejos=%u storage=%u\\n", (int)has_buffer, (void*)s_code_buffer.GetFreeCodePointer(), (unsigned)s_code_buffer.GetFreeCodeSpace(), (unsigned)s_code_buffer.GetFreeFarCodeSpace(), (unsigned)sizeof(s_code_storage)); fclose(lf); } }'),
           ]
+          viejo_rama = 'defined(__linux__) || defined(__ANDROID__) || defined(__APPLE__) || defined(__HAIKU__) || defined(__FreeBSD__)'
           s = open(ruta).read()
+          s2 = open(ruta2).read()
           for viejo, nuevo in pares:
               n = s.count(viejo)
               if n != 1:
                   print('PARCHE_FALLA (veces encontrado: %d): %s' % (n, viejo[:70]))
                   print('NO SE APLICA NINGUN PARCHE; se compila sin cambios')
                   sys.exit(0)
+          n2 = s2.count(viejo_rama)
+          if n2 < 1:
+              print('PARCHE_FALLA jit_code_buffer: rama no encontrada')
+              print('NO SE APLICA NINGUN PARCHE; se compila sin cambios')
+              sys.exit(0)
           for viejo, nuevo in pares:
               s = s.replace(viejo, nuevo)
+          s = '#include <stdio.h>\n' + s
+          s2 = s2.replace(viejo_rama, '1')
           open(ruta, 'w').write(s)
-          print('PARCHES_APLICADOS')
+          open(ruta2, 'w').write(s2)
+          print('PARCHES_APLICADOS (ramas cambiadas en jit_code_buffer: %d)' % n2)
           EOF
           python3 parche_jit.py
           echo "=== lineas parcheadas ==="
-          grep -n "RECOMPILER_CODE_CACHE_SIZE =\|RECOMPILER_FAR_CODE_CACHE_SIZE =\|RECOMPILER_GUARD_SIZE =\|alignas(" swan/src/core/cpu_code_cache.cpp | cut -c1-150
+          grep -n "RECOMPILER_CODE_CACHE_SIZE =\|RECOMPILER_FAR_CODE_CACHE_SIZE =\|RECOMPILER_GUARD_SIZE =\|jit_core" swan/src/core/cpu_code_cache.cpp | cut -c1-150
+          grep -n "^#elif 1\|^#if 1" swan/src/common/jit_code_buffer.cpp
+          echo "=== macros del compilador ==="
+          echo | clang --target=x86_64-pc-freebsd12-elf -dM -E -x c - | grep -i "freebsd\|linux\|__unix\|orbis" | head -20
       - name: Compilar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
