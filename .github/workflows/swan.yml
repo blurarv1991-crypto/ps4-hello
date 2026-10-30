@@ -24,6 +24,19 @@ jobs:
           mkdir -p swan/dep/stub
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
+      - name: Inspeccionar JIT (solo mirar, no cambia nada)
+        run: |
+          cd swan
+          echo "=== COMMIT ==="
+          git log -1 --format='%H %ad' | cut -c1-120
+          echo "=== USE_STATIC_CODE_BUFFER ==="
+          grep -rn "USE_STATIC_CODE_BUFFER" src | cut -c1-170 || true
+          echo "=== cpu_code_cache.cpp: buffer ==="
+          grep -n "has_buffer\|s_code_storage\|s_code_buffer\|JitCodeBuffer\|Allocate\|mprotect\|guard\|AllocateMemory\|CPUExecutionMode" src/core/cpu_code_cache.cpp | cut -c1-170 || true
+          echo "=== jit_code_buffer.cpp ==="
+          grep -n "mprotect\|mmap\|Allocate\|Initialize\|guard\|PROT_EXEC\|__FreeBSD__\|__x86_64__" src/common/jit_code_buffer.cpp | cut -c1-170 || true
+          echo "=== jit_code_buffer.h ==="
+          grep -n "Allocate\|Initialize\|guard\|m_owns_buffer" src/common/jit_code_buffer.h | cut -c1-170 || true
       - name: Compilar
         run: |
           OO=$PWD/tc/OpenOrbis/PS4Toolchain
