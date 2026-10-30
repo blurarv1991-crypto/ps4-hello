@@ -687,6 +687,125 @@ static inline uint16_t mezcla(uint16_t a, uint16_t b, unsigned w, uint32_t m) {
   return (uint16_t)(r | (r >> 16));
 }
 
+/* ---- Filtro de bordes (tipo FXAA, sobre la imagen ORIGINAL del juego, antes de estirarla) ----
+   nivel 1 = Suave, 2 = Fuerte. Detecta bordes por el brillo de los pixeles y mezcla cada pixel de
+   un borde con su vecino de enfrente, mas o menos segun lo largo que sea el escalon.
+   Usa la parte final de g_sbuf como memoria de trabajo (no hay memoria estatica nueva). */
+static int g_aa = 0;
+
+static inline int luma16(uint16_t p) {
+  int r, g, b;
+  if (g_pf == 0) { r = (p >> 10) & 31; g = ((p >> 5) & 31) << 1; b = p & 31; }
+  else { r = (p >> 11) & 31; g = (p >> 5) & 63; b = p & 31; }
+  return ((r << 3) * 77 + (g << 2) * 150 + (b << 3) * 29) >> 8;
+}
+
+static inline int iabs(int a) { return a < 0 ? -a : a; }
+
+/* src -> dst (w x h, 16 bits). lum: (w+2)*(h+2) bytes de brillo con borde repetido */
+static void aa_filtrar(const uint16_t *src, uint16_t *dst, uint8_t *lum, int w, int h, int nivel, uint32_t m) {
+  const int pw = w + 2, ph = h + 2;
+  for (int y = 0; y < ph; y++) {
+    int sy = y - 1;
+    if (sy < 0) sy = 0;
+    if (sy > h - 1) sy = h - 1;
+    const uint16_t *s = src + (size_t)sy * w;
+    uint8_t *l = lum + (size_t)y * pw;
+    for (int x = 0; x < pw; x++) {
+      int sx = x - 1;
+      if (sx < 0) sx = 0;
+      if (sx > w - 1) sx = w - 1;
+      l[x] = (uint8_t)luma16(s[sx]);
+    }
+  }
+  const int thr_min = (nivel == 2) ? 8 : 16;
+  const int thr_sh = (nivel == 2) ? 3 : 2;
+  const float subq = (nivel == 2) ? 0.75f : 0.5f;
+  const int MAXP = 8;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      const uint8_t *c = lum + (size_t)(y + 1) * pw + (x + 1);
+      int M = c[0], N = c[-pw], S = c[pw], Wl = c[-1], E = c[1];
+      int mx = M, mn = M;
+      if (N > mx) mx = N; if (N < mn) mn = N;
+      if (S > mx) mx = S; if (S < mn) mn = S;
+      if (Wl > mx) mx = Wl; if (Wl < mn) mn = Wl;
+      if (E > mx) mx = E; if (E < mn) mn = E;
+      int range = mx - mn;
+      uint16_t pm = src[(size_t)y * w + x];
+      if (range < thr_min || range < (mx >> thr_sh)) { dst[(size_t)y * w + x] = pm; continue; }
+      int NW = c[-pw - 1], NE = c[-pw + 1], SW = c[pw - 1], SE = c[pw + 1];
+      /* subpixel */
+      int lumaL = (2 * (N + S + Wl + E) + NW + NE + SW + SE) / 12;
+      float sp = (float)iabs(lumaL - M) / (float)range;
+      if (sp > 1.0f) sp = 1.0f;
+      float sd = -2.0f * sp + 3.0f, se = sp * sp, sf = sd * se;
+      float suboff = sf * sf * subq;
+      /* direccion del borde */
+      int edgeH = iabs(NW + SW - 2 * Wl) + 2 * iabs(N + S - 2 * M) + iabs(NE + SE - 2 * E);
+      int edgeV = iabs(NW + NE - 2 * N) + 2 * iabs(Wl + E - 2 * M) + iabs(SW + SE - 2 * S);
+      int horz = edgeH >= edgeV;
+      int opp, dir; /* dir: -1/+1 hacia el vecino de enfrente (en y si horz, en x si no) */
+      if (horz) {
+        if (iabs(N - M) >= iabs(S - M)) { opp = N; dir = -1; } else { opp = S; dir = 1; }
+      } else {
+        if (iabs(Wl - M) >= iabs(E - M)) { opp = Wl; dir = -1; } else { opp = E; dir = 1; }
+      }
+      int grad = iabs(opp - M);
+      float avg = 0.5f * (float)(opp + M);
+      float gs = 0.25f * (float)grad;
+      /* busqueda a lo largo del borde, en las dos direcciones */
+      int dist[2] = {MAXP, MAXP};
+      int endneg[2] = {0, 0};
+      for (int side = 0; side < 2; side++) {
+        int st = side ? -1 : 1;
+        for (int i = 1; i <= MAXP; i++) {
+          int xx = horz ? (x + 1 + st * i) : (x + 1);
+          int yy = horz ? (y + 1) : (y + 1 + st * i);
+          if (xx < 0 || xx >= pw || yy < 0 || yy >= ph) { dist[side] = i; break; }
+          int xo = horz ? xx : xx + dir;
+          int yo = horz ? yy + dir : yy;
+          if (xo < 0 || xo >= pw || yo < 0 || yo >= ph) { dist[side] = i; break; }
+          float le = 0.5f * (float)(lum[(size_t)yy * pw + xx] + lum[(size_t)yo * pw + xo]) - avg;
+          if (le >= gs || -le >= gs) { dist[side] = i; endneg[side] = (le < 0.0f); break; }
+        }
+      }
+      int near = dist[0] < dist[1] ? 0 : 1;
+      int dfin = dist[near];
+      int elen = dist[0] + dist[1];
+      float poff = 0.5f - (float)dfin / (float)elen;
+      int centro_menor = (float)M < avg;
+      if ((endneg[near] != 0) == (centro_menor != 0)) poff = 0.0f; /* variacion incorrecta */
+      float off = poff > suboff ? poff : suboff;
+      int w32 = (int)(off * 32.0f + 0.5f);
+      if (w32 > 32) w32 = 32;
+      if (w32 <= 0) { dst[(size_t)y * w + x] = pm; continue; }
+      int ox = horz ? x : x + dir, oy = horz ? y + dir : y;
+      if (ox < 0) ox = 0;
+      if (ox > w - 1) ox = w - 1;
+      if (oy < 0) oy = 0;
+      if (oy > h - 1) oy = h - 1;
+      dst[(size_t)y * w + x] = mezcla(pm, src[(size_t)oy * w + ox], (unsigned)w32, m);
+    }
+  }
+}
+
+/* Devuelve la imagen a usar para estirar: la original, o la filtrada (guardada en el final de g_sbuf,
+   lejos de donde se escribe la imagen estirada). Si no cabe, devuelve la original. */
+static const uint16_t *aa_aplicar(int w, int h, int W, int H, int nivel) {
+  if (nivel <= 0 || w < 8 || h < 8) return g_snap;
+  size_t total = (size_t)1920 * 1080;
+  size_t lumb = (size_t)(w + 2) * (size_t)(h + 2);
+  size_t lums = (lumb + 1) / 2;
+  size_t wh = (size_t)w * (size_t)h;
+  if (wh + lums + (size_t)W * (size_t)H > total) return g_snap;
+  uint8_t *lum = (uint8_t *)(g_sbuf + (total - lums));
+  uint16_t *dst = g_sbuf + (total - lums - wh);
+  uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
+  aa_filtrar(g_snap, dst, lum, w, h, nivel, m);
+  return dst;
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
@@ -717,6 +836,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     W = w * k;
     H = h * k;
   }
+  const uint16_t *src = aa_aplicar(w, h, W, H, g_aa);
   int sv = g_suav;
   if (sv && h <= 576 && W <= 1920 && H <= 1080) {
     uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
@@ -742,7 +862,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
         int y = ys[q];
         uint16_t *hr = g_hrow[y & 1];
         if (g_hrow_y[y & 1] != y) {
-          const uint16_t *sr = g_snap + (size_t)y * (size_t)w;
+          const uint16_t *sr = src + (size_t)y * (size_t)w;
           for (int x = 0; x < W; x++) {
             unsigned wx = g_hw[x];
             hr[x] = wx ? mezcla(sr[g_hi0[x]], sr[g_hi1[x]], wx, m) : sr[g_hi0[x]];
@@ -765,7 +885,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     g_xmap_W = W;
   }
   for (int y = 0; y < h; y++) {
-    const uint16_t *s = g_snap + (size_t)y * (size_t)w;
+    const uint16_t *s = src + (size_t)y * (size_t)w;
     uint16_t *d = g_sbuf + (size_t)(y * k) * W;
     for (int x = 0; x < W; x++) d[x] = s[g_xmap[x]];
     for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
@@ -1179,6 +1299,14 @@ static void suav_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Suavizado cambiado (no aplica con escala Original)");
 }
 
+static void aa_cambiar(int d) {
+  g_aa = (g_aa + d + 3) % 3;
+  FILE *f = fopen("/data/swan/aa.txt", "wb");
+  if (f) { fputc('0' + g_aa, f); fclose(f); }
+  esp("MENU: bordes = %d", g_aa);
+  snprintf(g_msg, sizeof(g_msg), "Bordes cambiado (no aplica con escala Original)");
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -1188,9 +1316,11 @@ static void menu_refrescar(void) {
   snprintf(g_ml[4], sizeof(g_ml[4]), "Aspecto: %s", g_asp ? "4:3" : "Cuadrado");
   const char *sv[3] = {"No", "Bajo", "Alto"};
   snprintf(g_ml[5], sizeof(g_ml[5]), "Suavizado: %s  (izq/der)", sv[g_suav % 3]);
-  snprintf(g_ml[6], sizeof(g_ml[6]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
-  snprintf(g_ml[7], sizeof(g_ml[7]), "Continuar");
-  g_menu_n = 8;
+  const char *bd[3] = {"No", "Suave", "Fuerte"};
+  snprintf(g_ml[6], sizeof(g_ml[6]), "Bordes: %s  (izq/der)", bd[g_aa % 3]);
+  snprintf(g_ml[7], sizeof(g_ml[7]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
+  snprintf(g_ml[8], sizeof(g_ml[8]), "Continuar");
+  g_menu_n = 9;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -1227,7 +1357,8 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 3) g_modo = (g_modo + dx + 4) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
       else if (g_menu_sel == 5) suav_cambiar(dx);
-      else if (g_menu_sel == 6) jit_conmutar();
+      else if (g_menu_sel == 6) aa_cambiar(dx);
+      else if (g_menu_sel == 7) jit_conmutar();
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -1237,8 +1368,9 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 3) g_modo = (g_modo + 1) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
       else if (g_menu_sel == 5) suav_cambiar(1);
-      else if (g_menu_sel == 6) jit_conmutar();
-      else if (g_menu_sel == 7) salir = 1;
+      else if (g_menu_sel == 6) aa_cambiar(1);
+      else if (g_menu_sel == 7) jit_conmutar();
+      else if (g_menu_sel == 8) salir = 1;
     }
     menu_refrescar();
     if (salir) break;
@@ -1439,6 +1571,13 @@ int main(void) {
       if (c >= '0' && c <= '2') g_suav = c - '0';
     }
     esp("SUAVIZADO inicial=%d", g_suav);
+    FILE *fa = fopen("/data/swan/aa.txt", "rb");
+    if (fa) {
+      int c = fgetc(fa);
+      fclose(fa);
+      if (c >= '0' && c <= '2') g_aa = c - '0';
+    }
+    esp("BORDES inicial=%d", g_aa);
   }
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
