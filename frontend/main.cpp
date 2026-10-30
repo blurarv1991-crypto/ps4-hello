@@ -201,6 +201,7 @@ static volatile int g_menu_vis = 0;
 static int g_menu_sel = 0, g_menu_n = 0;
 static char g_ml[10][72];
 static char g_msg[80] = "";
+static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
 static char g_juego_id[96] = "juego";
 static unsigned char g_estbuf[40 * 1024 * 1024];
@@ -350,17 +351,6 @@ int __wrap_mprotect(void *a, size_t l, int pr) {
       unsigned long ri = ini & ~16383UL;
       unsigned long rf = (fin + 16383UL) & ~16383UL;
       esp("JIT mprotect %p +%llu pr=%d -> sceKernelMprotect(%p, %llu, RWX)", a, (unsigned long long)l, pr, (void *)ri, (unsigned long long)(rf - ri));
-      {
-        /* Quien llama: direccion de retorno y palabras de la pila que parecen codigo del ejecutable */
-        unsigned long ref = (unsigned long)(void *)&esp;
-        esp("JIT quien llama: ret=%p ref_esp=%p", __builtin_return_address(0), (void *)ref);
-        unsigned long *sp = (unsigned long *)__builtin_frame_address(0);
-        int hits = 0;
-        for (int i = 0; i < 96 && hits < 24; i++) {
-          unsigned long v = sp[i];
-          if (v >= ref - 0x300000UL && v < ref + 0x600000UL) { esp("JIT pila[%d]=%p", i, (void *)v); hits++; }
-        }
-      }
       int r = mia_k_mprotect((void *)ri, (size_t)(rf - ri), 7);
       esp("JIT sceKernelMprotect = %d (%#x)", r, (unsigned)r);
       if (r == 0) {
@@ -1079,6 +1069,19 @@ static void estado_cargar(void) {
   esp("ESTADO cargado OK");
 }
 
+static void jit_conmutar(void) {
+  if (g_jit_pedido) {
+    unlink("/data/swan/jit.txt");
+    g_jit_pedido = 0;
+  } else {
+    int fd = open("/data/swan/jit.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd >= 0) close(fd);
+    g_jit_pedido = existe("/data/swan/jit.txt") ? 1 : 0;
+  }
+  esp("MENU: JIT pedido para el proximo arranque = %d", g_jit_pedido);
+  snprintf(g_msg, sizeof(g_msg), "JIT %s: reinicia la app para aplicarlo", g_jit_pedido ? "activado" : "desactivado");
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -1086,8 +1089,9 @@ static void menu_refrescar(void) {
   snprintf(g_ml[2], sizeof(g_ml[2]), "Ranura: %d  (izq/der)", g_ranura);
   snprintf(g_ml[3], sizeof(g_ml[3]), "Escala: %s  (izq/der)", esc[g_modo & 3]);
   snprintf(g_ml[4], sizeof(g_ml[4]), "Aspecto: %s", g_asp ? "4:3" : "Cuadrado");
-  snprintf(g_ml[5], sizeof(g_ml[5]), "Continuar");
-  g_menu_n = 6;
+  snprintf(g_ml[5], sizeof(g_ml[5]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
+  snprintf(g_ml[6], sizeof(g_ml[6]), "Continuar");
+  g_menu_n = 7;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -1123,6 +1127,7 @@ static void pausa_menu(void) {
       if (g_menu_sel == 2) g_ranura = ((g_ranura - 1 + dx + 4) % 4) + 1;
       else if (g_menu_sel == 3) g_modo = (g_modo + dx + 4) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
+      else if (g_menu_sel == 5) jit_conmutar();
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -1131,7 +1136,8 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 2) g_ranura = (g_ranura % 4) + 1;
       else if (g_menu_sel == 3) g_modo = (g_modo + 1) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
-      else if (g_menu_sel == 5) salir = 1;
+      else if (g_menu_sel == 5) jit_conmutar();
+      else if (g_menu_sel == 6) salir = 1;
     }
     menu_refrescar();
     if (salir) break;
@@ -1188,6 +1194,7 @@ int main(void) {
     g_cached = 0;
     esp("JIT activado por jit.txt (modo Recompiler)");
   }
+  g_jit_pedido = g_jit;
 
   SDL_RendererInfo ri;
   memset(&ri, 0, sizeof(ri));
