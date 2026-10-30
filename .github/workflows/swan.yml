@@ -24,7 +24,7 @@ jobs:
           mkdir -p swan/dep/stub
           printf '#include <pthread.h>\nstatic inline void pthread_set_name_np(pthread_t t, const char *n) { (void)t; (void)n; }\n' > swan/dep/stub/pthread_np.h
           sed 's/@[A-Za-z_0-9]*@/0/g' swan/src/libretro/version.h.in > swan/src/libretro/version.h
-      - name: Parchear JIT (prueba B - tamanos y sin guardas)
+      - name: Parchear JIT (tamanos y sin guardas)
         run: |
           cat > parche_jit.py << 'EOF'
           import sys
@@ -142,6 +142,15 @@ jobs:
           echo PRIMERAS; head -3 l2.txt | cut -c1-150
           echo RELLENOS; grep -c 'stub_hit("' stub.c || true
           grep -o 'stub_hit("[^"]*")' stub.c | cut -c11-100 | head -80 || true
+      - name: Simbolos
+        run: |
+          (nm -n -C p3.elf 2>/dev/null || true) | gzip > simbolos.txt.gz
+          ls -la simbolos.txt.gz
+      - name: Guardar simbolos
+        uses: actions/upload-artifact@v4
+        with:
+          name: simbolos
+          path: simbolos.txt.gz
       - name: Guardar elf
         uses: actions/upload-artifact@v4
         with:
