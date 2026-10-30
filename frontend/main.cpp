@@ -651,7 +651,7 @@ static int g_hi0[1920], g_hi1[1920];
 static unsigned char g_hw[1920];
 static int g_h_w = 0, g_h_W = 0, g_h_s = -1;
 static int g_vi0[1080], g_vi1[1080];
-static unsigned char g_vw[1080];
+static unsigned char g_svw[1080];
 static int g_v_h = 0, g_v_H = 0, g_v_s = -1;
 
 /* Tabla para pasar de n pixeles a N: indice i0, indice i1 y peso (0..32) de i1.
@@ -726,7 +726,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
       g_h_s = sv;
     }
     if (g_v_h != h || g_v_H != H || g_v_s != sv) {
-      suav_tabla(h, H, sv == 2 ? 2 : 0, g_vi0, g_vi1, g_vw);
+      suav_tabla(h, H, sv == 2 ? 2 : 0, g_vi0, g_vi1, g_svw);
       g_v_h = h;
       g_v_H = H;
       g_v_s = sv;
@@ -742,7 +742,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     for (int oy = 0; oy < H; oy++) {
       uint16_t *d = g_sbuf + (size_t)oy * W;
       const uint16_t *r0 = g_hbuf + (size_t)g_vi0[oy] * W;
-      unsigned wt = g_vw[oy];
+      unsigned wt = g_svw[oy];
       if (!wt) {
         memcpy(d, r0, (size_t)W * 2);
       } else {
