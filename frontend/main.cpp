@@ -218,11 +218,12 @@ static int g_xmap_w = 0, g_xmap_W = 0;
 static volatile int g_menu_toggle = 0;
 static volatile int g_menu_vis = 0;
 static int g_menu_sel = 0, g_menu_n = 0;
-static char g_ml[12][72];
+static char g_ml[14][72];
 static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
 static int g_salir = 0; /* 1 = el usuario pidio salir del juego desde el menu de opciones */
+static int g_volver = 0; /* 1 = el usuario pidio volver al menu de juegos */
 static volatile int g_parar = 0; /* 1 = los hilos de audio y dibujo deben terminar */
 static SDL_Thread *g_th_audio = NULL;
 static SDL_Thread *g_th_dib = NULL;
@@ -1067,13 +1068,13 @@ static void dibujar_juego(void) {
   if (g_menu_vis) {
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(R, 0, 0, 40, 220);
-    SDL_Rect pn = {420, 180, 1080, 800};
+    SDL_Rect pn = {420, 180, 1080, 860};
     SDL_RenderFillRect(R, &pn);
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
     SDL_RenderSetScale(R, 3, 3);
     texto(150, 60, "OPCIONES  (L3 o O: cerrar)");
     int mn = g_menu_n;
-    for (int mi = 0; mi < mn && mi < 12; mi++) {
+    for (int mi = 0; mi < mn && mi < 14; mi++) {
       char ml[90];
       snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
       texto(150, 82 + mi * 18, ml);
@@ -1693,6 +1694,9 @@ static int elegir_juego(char *out, size_t outn) {
   free(g_cov);
   g_cov = NULL;
   g_ncov = 0;
+  g_cov_listadas = 0;
+  g_cov_pend = -2;
+  g_cov_hay = -1;
 #endif
   return 1;
 }
@@ -1796,8 +1800,9 @@ static void menu_refrescar(void) {
   snprintf(g_ml[8], sizeof(g_ml[8]), g_s2x ? "Scale2x: Si (sin Bordes/Nitidez)" : "Scale2x: No");
   snprintf(g_ml[9], sizeof(g_ml[9]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
   snprintf(g_ml[10], sizeof(g_ml[10]), "Continuar");
-  snprintf(g_ml[11], sizeof(g_ml[11]), "Salir del juego");
-  g_menu_n = 12;
+  snprintf(g_ml[11], sizeof(g_ml[11]), "Volver al menu de juegos");
+  snprintf(g_ml[12], sizeof(g_ml[12]), "Salir de la app");
+  g_menu_n = 13;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -1856,8 +1861,12 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 9) jit_conmutar();
       else if (g_menu_sel == 10) salir = 1;
       else if (g_menu_sel == 11) {
+        if (conf) { g_volver = 1; salir = 1; }
+        else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para volver al menu (se cierra el juego)"); }
+      }
+      else if (g_menu_sel == 12) {
         if (conf) { g_salir = 1; salir = 1; }
-        else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para salir del juego"); }
+        else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para cerrar la app"); }
       }
     }
     menu_refrescar();
@@ -2034,6 +2043,7 @@ int main(void) {
   retro_init();
   paso("2) retro_init OK");
 
+inicio_menu:;
   char ruta_menu[300];
   const char *ruta = NULL;
   if (elegir_juego(ruta_menu, sizeof(ruta_menu))) ruta = ruta_menu;
@@ -2101,7 +2111,7 @@ int main(void) {
   unsigned long long ain_prev = 0;
   unsigned t_prev = SDL_GetTicks();
   unsigned hb_prev = 0, hs_prev = 0;
-  if (g_aud >= 0) {
+  if (g_aud >= 0 && !g_th_audio) {
     g_th_audio = SDL_CreateThread(hilo_audio, "audio", NULL);
     g_hilo_ok = g_th_audio ? 1 : 0;
     esp("AUDIO hilo %s", g_hilo_ok ? "creado" : "NO se pudo crear (audio en el bucle principal)");
@@ -2141,7 +2151,7 @@ int main(void) {
     esp("SCALE2X inicial=%d", g_s2x);
   }
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
-  if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
+  if (!g_th_dib && quiere_hilo && (g_pf == 2 || g_pf == 0)) {
     g_th_dib = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
     g_dib_hilo = g_th_dib ? 1 : 0;
     esp("DIBUJO hilo %s", g_dib_hilo ? "creado" : "NO se pudo crear (dibujo en el bucle principal)");
@@ -2155,6 +2165,7 @@ int main(void) {
     if (g_menu_toggle) {
       g_menu_toggle = 0;
       pausa_menu();
+      if (g_volver) break;
       if (g_salir) {
         salir_del_juego();
         cierre_final();
@@ -2207,5 +2218,18 @@ int main(void) {
       n_upd = n_dib = 0;
     }
   }
-  return 0;
+  /* ---- volver al menu de juegos (el nucleo sigue iniciado; no se llama a retro_deinit) ---- */
+  esp("VOLVER: esperando al hilo de dibujo...");
+  for (int e = 0; e < 200 && __atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 2; e++) SDL_Delay(10);
+  __atomic_store_n(&g_dib_estado, 0, __ATOMIC_RELEASE);
+  g_menu_vis = 0;
+  esp("VOLVER: retro_unload_game...");
+  retro_unload_game();
+  esp("VOLVER: juego descargado");
+  g_dp = NULL; g_dw = 0; g_dh = 0; g_sw = 0; g_sh = 0; g_vnz = 0; g_vc = 0;
+  g_rpos = 0.0; g_pl = 0; g_pr = 0;
+  g_jugando = 0;
+  g_volver = 0;
+  esp("VOLVER: mostrando el menu de juegos");
+  goto inicio_menu;
 }
