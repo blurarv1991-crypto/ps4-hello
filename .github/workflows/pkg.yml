@@ -58,6 +58,11 @@ jobs:
           gh run download $ID --repo ${{ github.repository }} -n p3elf -D work
           ls -la work
 
+      - name: Traer icono propio
+        uses: actions/checkout@v4
+        with:
+          path: mio
+
       - name: Empaquetar
         run: |
           OO=$OO_PS4_TOOLCHAIN
@@ -65,7 +70,7 @@ jobs:
           CID=IV0000-BREW00091_00-SWANSTATION00000
           cd work
           mkdir -p sce_sys/about sce_module
-          cp ../src/samples/SDL2/sce_sys/icon0.png sce_sys/icon0.png
+          if [ -f ../mio/icon0.png ]; then cp ../mio/icon0.png sce_sys/icon0.png; else cp ../src/samples/SDL2/sce_sys/icon0.png sce_sys/icon0.png; fi
           cp "$(find "$OO" ../src -name right.sprx | head -1)" sce_sys/about/right.sprx
           for f in libc.prx libSceFios2.prx; do cp "$(find "$OO" ../src -name $f | head -1)" sce_module/$f; done
           $T/create-fself -in=p3.elf -out=p3.oelf --eboot "eboot.bin" --paid 0x3800000000000011
