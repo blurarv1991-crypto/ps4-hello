@@ -37,6 +37,7 @@ extern "C" {
 int mia_aud_init(void) __asm__("sceAudioOutInit");
 int mia_aud_open(int uid, int tipo, int indice, unsigned len, unsigned freq, unsigned param) __asm__("sceAudioOutOpen");
 int mia_aud_out(int handle, const void *datos) __asm__("sceAudioOutOutput");
+int mia_aud_close(int handle) __asm__("sceAudioOutClose");
 }
 
 /* Carpetas: funciones del nucleo de la PS4 (libkernel) para listar /data/swan/juegos */
@@ -222,6 +223,9 @@ static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
 static int g_salir = 0; /* 1 = el usuario pidio salir del juego desde el menu de opciones */
+static volatile int g_parar = 0; /* 1 = los hilos de audio y dibujo deben terminar */
+static SDL_Thread *g_th_audio = NULL;
+static SDL_Thread *g_th_dib = NULL;
 static char g_juego_id[96] = "juego";
 static unsigned char g_estbuf[40 * 1024 * 1024];
 static int g_cada = 3;
@@ -546,6 +550,7 @@ static int hilo_audio(void *arg) {
   (void)arg;
   static int16_t grano[GRANO * 2];
   for (;;) {
+    if (g_parar) break;
     unsigned at = __atomic_load_n(&g_at, __ATOMIC_ACQUIRE);
     unsigned ah = g_ah;
     int hay = (at - ah >= GRANO);
@@ -1124,6 +1129,7 @@ static int hilo_dibujo(void *arg) {
   esp("DIBUJO hilo: arranca");
   int primero = 1;
   for (;;) {
+    if (g_parar) break;
     if (__atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 1) {
       __atomic_store_n(&g_dib_estado, 2, __ATOMIC_RELAXED);
       if (primero) esp("DIBUJO hilo: primer cuadro, empieza");
@@ -1898,9 +1904,17 @@ static void salir_del_juego(void) {
   retro_unload_game();
   esp("SALIR: retro_deinit...");
   retro_deinit();
+  esp("SALIR: parando los hilos...");
+  g_parar = 1;
+  if (g_th_dib) SDL_WaitThread(g_th_dib, NULL);
+  esp("SALIR: hilo de dibujo parado");
+  if (g_th_audio) SDL_WaitThread(g_th_audio, NULL);
+  esp("SALIR: hilo de audio parado");
+  if (g_aud >= 0) {
+    int rc = mia_aud_close(g_aud);
+    esp("SALIR: audio cerrado (ret=%d)", rc);
+  }
   esp("SALIR: listo, cerrando la app");
-  if (g_fd >= 0) close(g_fd);
-  _exit(0);
 }
 
 int main(void) {
@@ -2050,8 +2064,8 @@ int main(void) {
   unsigned t_prev = SDL_GetTicks();
   unsigned hb_prev = 0, hs_prev = 0;
   if (g_aud >= 0) {
-    SDL_Thread *th = SDL_CreateThread(hilo_audio, "audio", NULL);
-    g_hilo_ok = th ? 1 : 0;
+    g_th_audio = SDL_CreateThread(hilo_audio, "audio", NULL);
+    g_hilo_ok = g_th_audio ? 1 : 0;
     esp("AUDIO hilo %s", g_hilo_ok ? "creado" : "NO se pudo crear (audio en el bucle principal)");
   }
   /* El hilo de dibujo se usa siempre, salvo que exista /data/swan/sin_hilo.txt */
@@ -2090,8 +2104,8 @@ int main(void) {
   }
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (quiere_hilo && (g_pf == 2 || g_pf == 0)) {
-    SDL_Thread *td = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
-    g_dib_hilo = td ? 1 : 0;
+    g_th_dib = SDL_CreateThread(hilo_dibujo, "dibujo", NULL);
+    g_dib_hilo = g_th_dib ? 1 : 0;
     esp("DIBUJO hilo %s", g_dib_hilo ? "creado" : "NO se pudo crear (dibujo en el bucle principal)");
   }
   g_cada = g_dib_hilo ? 2 : 3;
@@ -2103,7 +2117,11 @@ int main(void) {
     if (g_menu_toggle) {
       g_menu_toggle = 0;
       pausa_menu();
-      if (g_salir) salir_del_juego();
+      if (g_salir) {
+        salir_del_juego();
+        SDL_Quit();
+        return 0;
+      }
     }
     i++;
     g_frames = i;
