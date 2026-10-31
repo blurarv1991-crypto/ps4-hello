@@ -211,6 +211,13 @@ static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
 static int g_modo = 3;
 static int g_asp = 1; /* 1 = corregir a 4:3, 0 = pixeles cuadrados (L2+R2+L3 cambia) */
+/* Marco de TV retro: /data/swan/marco.png (1920x1080, pantalla transparente) */
+static SDL_Texture *g_marco_tex = NULL;
+static int g_marco_cargado = 0;
+static int g_marco_on = 1;   /* L2+R2+R3 activa/desactiva el marco */
+static int g_tex_lin = 0;    /* 1 si g_tex se creo con filtro lineal */
+static SDL_Rect g_marco_hueco = {0, 0, 0, 0};
+static int g_rec_x = 0, g_rec_y = 0; /* recorte por lado, en milesimas (0..200) */
 static int g_xmap[1920];
 static int g_xmap_w = 0, g_xmap_W = 0;
 
@@ -614,7 +621,8 @@ static void poll(void) {
      L3 solo: abre/cierra el menu de opciones */
   if ((nuevos & PB_L3) && (b & PB_L2) && (b & PB_R2)) g_asp = !g_asp;
   else if (nuevos & PB_L3) g_menu_toggle = 1;
-  if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
+  if ((nuevos & PB_R3) && (b & PB_L2) && (b & PB_R2)) g_marco_on = !g_marco_on;
+  else if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
   g_btn_prev = b;
 }
 
@@ -1026,6 +1034,79 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   return 1;
 }
 
+/* Carga el marco una sola vez. El hueco de la pantalla se detecta solo:
+   es la zona transparente que rodea el centro del PNG. Opcional: /data/swan/marco.txt
+   con "x y w h recX recY" (hueco en pixeles de 1920x1080, recorte en milesimas por lado) */
+#ifdef HAY_STBI
+static void cargar_marco(void) {
+  if (g_marco_cargado) return;
+  g_marco_cargado = 1;
+  FILE *f = fopen("/data/swan/marco.png", "rb");
+  if (!f) { esp("MARCO: no hay /data/swan/marco.png"); return; }
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz <= 8 || sz > 12 * 1024 * 1024) { fclose(f); esp("MARCO: tamano raro %ld", sz); return; }
+  unsigned char *datos = (unsigned char *)malloc((size_t)sz);
+  if (!datos) { fclose(f); return; }
+  size_t rd = fread(datos, 1, (size_t)sz, f);
+  fclose(f);
+  int w = 0, h = 0, ch = 0;
+  unsigned char *px = (rd == (size_t)sz) ? stbi_load_from_memory(datos, (int)sz, &w, &h, &ch, 4) : NULL;
+  free(datos);
+  if (!px || w <= 0 || h <= 0 || (long long)w * h > 16000000LL) {
+    esp("MARCO: no se pudo leer el PNG");
+    if (px) stbi_image_free(px);
+    return;
+  }
+  #define MA(x, y) (px[((size_t)(y) * w + (x)) * 4 + 3])
+  int cx = w / 2, cy = h / 2;
+  int x0 = cx, x1 = cx, y0 = cy, y1 = cy;
+  if (MA(cx, cy) <= 16) {
+    while (x0 > 0 && MA(x0 - 1, cy) <= 16) x0--;
+    while (x1 < w - 1 && MA(x1 + 1, cy) <= 16) x1++;
+    while (y0 > 0 && MA(cx, y0 - 1) <= 16) y0--;
+    while (y1 < h - 1 && MA(cx, y1 + 1) <= 16) y1++;
+    g_marco_hueco.x = (int)((long long)x0 * 1920 / w);
+    g_marco_hueco.y = (int)((long long)y0 * 1080 / h);
+    g_marco_hueco.w = (int)((long long)(x1 - x0 + 1) * 1920 / w);
+    g_marco_hueco.h = (int)((long long)(y1 - y0 + 1) * 1080 / h);
+  } else {
+    esp("MARCO: el centro del PNG no es transparente; usa marco.txt");
+  }
+  #undef MA
+  if (g_marco_hueco.w > 0 && g_marco_hueco.h > 0) {
+    int w43 = g_marco_hueco.h * 4 / 3;
+    if (w43 < g_marco_hueco.w) {
+      g_marco_hueco.x += (g_marco_hueco.w - w43) / 2;
+      g_marco_hueco.w = w43;
+    }
+  }
+  FILE *ft = fopen("/data/swan/marco.txt", "rb");
+  if (ft) {
+    int a = 0, b = 0, c = 0, d = 0, e = 0, g = 0;
+    if (fscanf(ft, "%d %d %d %d %d %d", &a, &b, &c, &d, &e, &g) >= 4 && c > 0 && d > 0) {
+      g_marco_hueco.x = a; g_marco_hueco.y = b; g_marco_hueco.w = c; g_marco_hueco.h = d;
+      if (e >= 0 && e <= 200) g_rec_x = e;
+      if (g >= 0 && g <= 200) g_rec_y = g;
+    }
+    fclose(ft);
+  }
+  if (g_marco_hueco.w > 0 && g_marco_hueco.h > 0) {
+    g_marco_tex = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+    if (g_marco_tex) {
+      SDL_UpdateTexture(g_marco_tex, NULL, px, w * 4);
+      SDL_SetTextureBlendMode(g_marco_tex, SDL_BLENDMODE_BLEND);
+    }
+  }
+  stbi_image_free(px);
+  esp("MARCO: %dx%d hueco=%d,%d %dx%d recorte=%d,%d tex=%p", w, h, g_marco_hueco.x, g_marco_hueco.y,
+      g_marco_hueco.w, g_marco_hueco.h, g_rec_x, g_rec_y, (void *)g_marco_tex);
+}
+#else
+static void cargar_marco(void) {}
+#endif
+
 /* Pantalla de juego: modo 0 original, 1 = 2x, 2 = 3x, 3 = maximo */
 static void dibujar_juego(void) {
   double t0 = ahora_us();
@@ -1033,11 +1114,15 @@ static void dibujar_juego(void) {
   SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
   int hecho = 0;
-  if (g_modo == 0 && g_sw > 0 && g_sh > 0) {
-    if (!g_tex || g_tw != (int)g_sw || g_th != (int)g_sh) {
+  int marco = (g_marco_tex && g_marco_on && g_sw > 0 && g_sh > 0) ? 1 : 0;
+  if ((g_modo == 0 || marco) && g_sw > 0 && g_sh > 0) {
+    if (!g_tex || g_tw != (int)g_sw || g_th != (int)g_sh || g_tex_lin != marco) {
       if (g_tex) SDL_DestroyTexture(g_tex);
       Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
+      SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, marco ? "1" : "0");
       g_tex = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, (int)g_sw, (int)g_sh);
+      SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+      g_tex_lin = marco;
       g_tw = (int)g_sw;
       g_th = (int)g_sh;
       esp("TEXTURA %dx%d fmt=%d ptr=%p", g_tw, g_th, g_pf, (void *)g_tex);
@@ -1050,7 +1135,14 @@ static void dibujar_juego(void) {
     }
   }
   double te0 = ahora_us();
-  if (g_modo >= 1) {
+  if (marco && g_tex && g_tw > 0 && g_th > 0) {
+    int cx = g_tw * g_rec_x / 1000, cy = g_th * g_rec_y / 1000;
+    SDL_Rect src = {cx, cy, g_tw - 2 * cx, g_th - 2 * cy};
+    SDL_RenderCopy(R, g_tex, &src, &g_marco_hueco);
+    SDL_RenderCopy(R, g_marco_tex, NULL, NULL);
+    g_kreal = 1;
+    hecho = 1;
+  } else if (g_modo >= 1) {
     int kp = (g_modo == 1) ? 2 : (g_modo == 2 ? 3 : 0);
     int W = 0, H = 0;
     if (escalar_propio(kp, &W, &H)) {
@@ -1069,26 +1161,36 @@ static void dibujar_juego(void) {
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(R, 0, 0, 40, 220);
     SDL_Rect pn = {420, 180, 1080, 860};
+    int dy = 0;
+    if (marco) {
+      pn.x = g_marco_hueco.x + 4;
+      pn.y = g_marco_hueco.y + 14;
+      pn.w = g_marco_hueco.w - 8;
+      pn.h = g_marco_hueco.h - 24;
+      dy = -8;
+    }
     SDL_RenderFillRect(R, &pn);
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
     SDL_RenderSetScale(R, 3, 3);
-    texto(150, 60, "OPCIONES  (L3 o O: cerrar)");
+    texto(150, 60 + dy, "OPCIONES  (L3 o O: cerrar)");
     int mn = g_menu_n;
     for (int mi = 0; mi < mn && mi < 14; mi++) {
       char ml[90];
       snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
-      texto(150, 82 + mi * 18, ml);
+      texto(150, 82 + dy + mi * 18, ml);
     }
     char mg[90];
     snprintf(mg, sizeof(mg), "%s", g_msg);
-    texto(150, 82 + mn * 18 + 10, mg);
+    texto(150, 82 + dy + mn * 18 + 10, mg);
   }
   double t1 = ahora_us();
-  SDL_RenderSetScale(R, 2, 2);
-  char t[240];
-  snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d k:%d pad:%x au:%d in/s:%d q:%u", g_frames,
-           m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, g_kreal, (unsigned)g_btn, g_aud, m_ain, g_at - g_ah);
-  texto(5, 5, t);
+  if (!marco) {
+    SDL_RenderSetScale(R, 2, 2);
+    char t[240];
+    snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d k:%d pad:%x au:%d in/s:%d q:%u", g_frames,
+             m_run / 10, m_run % 10, m_pre / 10, m_pre % 10, g_kreal, (unsigned)g_btn, g_aud, m_ain, g_at - g_ah);
+    texto(5, 5, t);
+  }
   double t2 = ahora_us();
   SDL_RenderPresent(R);
   double t3 = ahora_us();
@@ -1448,7 +1550,7 @@ static void portada_actualizar(int sel, int maxw, int maxh) {
 #endif
 
 /* ---- Menu de juegos (pantalla de inicio) ---- */
-#define MENU_VIS 12   /* filas visibles de la lista */
+#define MENU_VIS 11   /* filas visibles de la lista */
 #define MENU_FILA 60  /* alto de cada fila, en pixeles */
 
 /* Texto con escala y color propios. x, y en pixeles de pantalla (1920x1080). */
@@ -1513,7 +1615,7 @@ static void nombre_bonito(const char *src, char *dst, size_t n, size_t maxc) {
   }
 }
 
-static void dibujar_menu(int sel, int top) {
+static void dibujar_menu_clasico(int sel, int top) {
   SDL_RenderSetScale(R, 1, 1);
   /* fondo con degradado vertical */
   for (int i = 0; i < 54; i++) {
@@ -1615,6 +1717,121 @@ static void dibujar_menu(int sel, int top) {
   texto_col(94, 1010, 3, 255, 255, 255, "X");
   texto_col(170, 1010, 3, 255, 255, 255, "JUGAR");
   texto_col(430, 1010, 3, 175, 180, 220, "ARRIBA / ABAJO: MOVER");
+  SDL_RenderPresent(R);
+}
+
+/* ---- Menu de juegos estilo PS1. Fondo: /data/swan/fondo_menu.png (1920x1080).
+   Sin ese archivo se usa el menu clasico de siempre. ---- */
+static SDL_Texture *g_fondo_menu = NULL;
+static int g_fondo_probado = 0;
+
+#ifdef HAY_STBI
+static void cargar_fondo_menu(void) {
+  if (g_fondo_probado) return;
+  g_fondo_probado = 1;
+  FILE *f = fopen("/data/swan/fondo_menu.png", "rb");
+  if (!f) { esp("MENU: no hay /data/swan/fondo_menu.png (menu clasico)"); return; }
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz <= 8 || sz > 12 * 1024 * 1024) { fclose(f); return; }
+  unsigned char *datos = (unsigned char *)malloc((size_t)sz);
+  if (!datos) { fclose(f); return; }
+  size_t rd = fread(datos, 1, (size_t)sz, f);
+  fclose(f);
+  int w = 0, h = 0, ch = 0;
+  unsigned char *px = (rd == (size_t)sz) ? stbi_load_from_memory(datos, (int)sz, &w, &h, &ch, 4) : NULL;
+  free(datos);
+  if (!px || w <= 0 || h <= 0 || (long long)w * h > 16000000LL) {
+    esp("MENU: no se pudo leer fondo_menu.png");
+    if (px) stbi_image_free(px);
+    return;
+  }
+  g_fondo_menu = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+  if (g_fondo_menu) SDL_UpdateTexture(g_fondo_menu, NULL, px, w * 4);
+  stbi_image_free(px);
+  esp("MENU: fondo cargado %dx%d tex=%p", w, h, (void *)g_fondo_menu);
+}
+#else
+static void cargar_fondo_menu(void) { g_fondo_probado = 1; }
+#endif
+
+/* posiciones medidas sobre el fondo (1920x1080) */
+#define PS_LX 292     /* barra de seleccion: x */
+#define PS_LW 856     /* ancho */
+#define PS_LY 252     /* y de la primera fila */
+#define PS_FILA 54    /* alto de fila */
+
+static void dibujar_menu(int sel, int top) {
+  cargar_fondo_menu();
+  if (!g_fondo_menu) { dibujar_menu_clasico(sel, top); return; }
+  SDL_RenderSetScale(R, 1, 1);
+  SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
+  SDL_RenderClear(R);
+  SDL_RenderCopy(R, g_fondo_menu, NULL, NULL);
+
+  /* lista de juegos */
+  for (int k = 0; k < MENU_VIS; k++) {
+    int i = top + k;
+    if (i >= g_nj) break;
+    int y = PS_LY + k * PS_FILA;
+    char nombre[128];
+    nombre_bonito(g_jn[i], nombre, sizeof(nombre), 31);
+    if (i == sel) {
+      SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
+      SDL_Rect bar = {PS_LX, y, PS_LW, PS_FILA - 1};
+      SDL_RenderFillRect(R, &bar);
+      texto_col(PS_LX + 28, y + 12, 4, 20, 20, 40, nombre);
+    } else {
+      texto_col(PS_LX + 30, y + 14, 4, 4, 4, 28, nombre);
+      texto_col(PS_LX + 28, y + 12, 4, 255, 255, 255, nombre);
+    }
+  }
+
+  /* caratula dentro del marco de la derecha */
+  const int CX = 1236, CY = 229, CW = 396, CH = 399;
+  int con_cov = 0;
+#ifdef HAY_STBI
+  portada_actualizar(sel, CW - 8, CH - 8);
+  con_cov = (g_cov_hay >= 0);
+  if (con_cov && g_cov_tex && g_cov_idx == sel) {
+    SDL_Rect dp = {CX + (CW - g_cov_w) / 2, CY + (CH - g_cov_h) / 2, g_cov_w, g_cov_h};
+    SDL_RenderCopy(R, g_cov_tex, NULL, &dp);
+  }
+#endif
+  if (!con_cov) texto_col(CX + 62, CY + 180, 3, 120, 130, 190, "SIN PORTADA");
+
+  /* nombre del juego (hasta 3 lineas) y contador */
+  char full[128];
+  nombre_bonito(g_jn[sel], full, sizeof(full), 63);
+  {
+    char linea[40];
+    int y = 718, lineas = 0;
+    const char *p = full;
+    while (*p && lineas < 3) {
+      const char *fin = p, *ult = NULL;
+      int cnt = 0;
+      while (*fin && cnt < 21) {
+        if (*fin == ' ') ult = fin;
+        fin++;
+        cnt++;
+      }
+      if (*fin && ult) fin = ult;
+      int ln = (int)(fin - p);
+      if (ln > 38) ln = 38;
+      memcpy(linea, p, (size_t)ln);
+      linea[ln] = 0;
+      texto_col(1251, y + 2, 3, 4, 4, 28, linea);
+      texto_col(1249, y, 3, 255, 255, 255, linea);
+      y += 38;
+      lineas++;
+      p = fin;
+      while (*p == ' ') p++;
+    }
+  }
+  char t[64];
+  snprintf(t, sizeof(t), "JUEGO %d DE %d", sel + 1, g_nj);
+  texto_col(1249, 858, 3, 255, 255, 255, t);
   SDL_RenderPresent(R);
 }
 
@@ -2105,6 +2322,7 @@ inicio_menu:;
     esp("ESTADO id del juego: %s", g_juego_id);
   }
   paso("4) load_game OK; mostrando imagen...");
+  cargar_marco();
   esp("INICIO frames (sin limite)");
   g_jugando = 1;
   int i = 0;
