@@ -656,9 +656,90 @@ static void texto(float x, float y, const char *s) {
   }
 }
 
+static void texto_col(float x, float y, int esc, int r, int g, int b, const char *s);
+
+/* Pantallas de carga con imagen:
+   /data/swan/inicio.png  -> al abrir la app (en lugar del fondo azul)
+   portada del juego elegido -> mientras carga el juego
+   Con /data/swan/debug.txt se vuelve a ver el texto de diagnostico encima. */
+static SDL_Texture *g_splash_fondo = NULL;
+static int g_splash_probado = 0;
+static int g_splash_debug = 0;
+static SDL_Texture *g_splash_cov = NULL;
+static int g_splash_cw = 0, g_splash_ch = 0;
+static char g_splash_nombre[128] = "";
+
+#ifdef HAY_STBI
+static SDL_Texture *png_a_textura(const char *ruta) {
+  FILE *f = fopen(ruta, "rb");
+  if (!f) return NULL;
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz <= 8 || sz > 12 * 1024 * 1024) { fclose(f); return NULL; }
+  unsigned char *datos = (unsigned char *)malloc((size_t)sz);
+  if (!datos) { fclose(f); return NULL; }
+  size_t rd = fread(datos, 1, (size_t)sz, f);
+  fclose(f);
+  int w = 0, h = 0, ch = 0;
+  unsigned char *px = (rd == (size_t)sz) ? stbi_load_from_memory(datos, (int)sz, &w, &h, &ch, 4) : NULL;
+  free(datos);
+  if (!px || w <= 0 || h <= 0 || (long long)w * h > 16000000LL) {
+    if (px) stbi_image_free(px);
+    return NULL;
+  }
+  SDL_Texture *t = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+  if (t) {
+    SDL_UpdateTexture(t, NULL, px, w * 4);
+    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+  }
+  stbi_image_free(px);
+  return t;
+}
+#endif
+
+static void splash_liberar(void) {
+  if (g_splash_cov) SDL_DestroyTexture(g_splash_cov);
+  g_splash_cov = NULL;
+  g_splash_cw = g_splash_ch = 0;
+}
+
 static void dibujar(void) {
-  SDL_SetRenderDrawColor(R, 0, 0, 80, 255);
-  SDL_RenderClear(R);
+  if (!g_splash_probado) {
+    g_splash_probado = 1;
+    g_splash_debug = existe("/data/swan/debug.txt") ? 1 : 0;
+#ifdef HAY_STBI
+    g_splash_fondo = png_a_textura("/data/swan/inicio.png");
+#endif
+  }
+  SDL_RenderSetScale(R, 1, 1);
+  int con_imagen = 0;
+  if (g_splash_cov && g_splash_cw > 0 && g_splash_ch > 0) {
+    SDL_SetRenderDrawColor(R, 8, 8, 24, 255);
+    SDL_RenderClear(R);
+    int dh = 720;
+    int dw = (int)((long long)g_splash_cw * dh / g_splash_ch);
+    if (dw > 1500) { dw = 1500; dh = (int)((long long)g_splash_ch * dw / g_splash_cw); }
+    SDL_Rect dp = {(1920 - dw) / 2, 90, dw, dh};
+    SDL_RenderCopy(R, g_splash_cov, NULL, &dp);
+    int n = (int)strlen(g_splash_nombre);
+    texto_col((float)((1920 - n * 24) / 2), (float)(dp.y + dh + 40), 4, 255, 255, 255, g_splash_nombre);
+    texto_col(830, (float)(dp.y + dh + 100), 3, 170, 175, 235, "CARGANDO...");
+    con_imagen = 1;
+  } else if (g_splash_fondo) {
+    SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
+    SDL_RenderClear(R);
+    SDL_RenderCopy(R, g_splash_fondo, NULL, NULL);
+    con_imagen = 1;
+  }
+  if (con_imagen && !g_splash_debug) {
+    SDL_RenderPresent(R);
+    return;
+  }
+  if (!con_imagen) {
+    SDL_SetRenderDrawColor(R, 0, 0, 80, 255);
+    SDL_RenderClear(R);
+  }
   SDL_RenderSetScale(R, 2, 2);
   float y = 10;
   char t[200];
@@ -1254,7 +1335,7 @@ static void dibujar_juego(void) {
     texto(150, 82 + dy + mn * 18 + 10, mg);
   }
   double t1 = ahora_us();
-  if (!marco) {
+  if (!marco || g_splash_debug) {
     SDL_RenderSetScale(R, 2, 2);
     char t[240];
     snprintf(t, sizeof(t), "F:%d run:%d.%d pre:%d.%d k:%d pad:%x au:%d in/s:%d q:%u", g_frames,
@@ -1270,6 +1351,7 @@ static void dibujar_juego(void) {
 }
 
 static void esperar(int frames) {
+  if (!g_splash_debug && (g_splash_cov || g_splash_fondo) && frames > 12) frames = 12;
   for (int i = 0; i < frames; i++) {
     dibujar();
     SDL_Delay(16);
@@ -1977,6 +2059,27 @@ static int elegir_juego(char *out, size_t outn) {
   }
   esp("MENU elegido (%d de %d): %s", sel + 1, n, out);
 #ifdef HAY_STBI
+  /* portada para la pantalla de carga del juego */
+  splash_liberar();
+  nombre_bonito(g_jn[sel], g_splash_nombre, sizeof(g_splash_nombre), 40);
+  if (!g_cov_listadas) listar_portadas();
+  {
+    int ci = buscar_portada(g_jn[sel]);
+    if (ci >= 0) {
+      SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+      cargar_portada(sel, ci, 900, 900);
+      SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+      if (g_cov_tex && g_cov_idx == sel) {
+        g_splash_cov = g_cov_tex;
+        g_splash_cw = g_cov_w;
+        g_splash_ch = g_cov_h;
+        g_cov_tex = NULL;
+        g_cov_idx = -1;
+        g_cov_w = 0;
+        g_cov_h = 0;
+      }
+    }
+  }
   portada_liberar();
   free(g_cov);
   g_cov = NULL;
@@ -2342,6 +2445,8 @@ inicio_menu:;
     }
   }
   if (!ruta) {
+    splash_liberar();
+    g_splash_debug = 1;
     paso("Sin juegos: pon archivos en /data/swan/juegos");
     esperar(1800);
     SDL_Quit();
@@ -2360,6 +2465,8 @@ inicio_menu:;
   esp("FIN retro_load_game = %d", ok ? 1 : 0);
   if (!ok) {
     g_traza = 0;
+    splash_liberar();
+    g_splash_debug = 1;
     paso("3) load_game DEVOLVIO FALSE");
     esperar(1800);
     SDL_Quit();
@@ -2394,6 +2501,7 @@ inicio_menu:;
   paso("4) load_game OK; mostrando imagen...");
   cargar_marco();
   esp("INICIO frames (sin limite)");
+  splash_liberar();
   g_jugando = 1;
   int i = 0;
   unsigned long long ain_prev = 0;
