@@ -1917,6 +1917,44 @@ static void salir_del_juego(void) {
   esp("SALIR: listo, cerrando la app");
 }
 
+/* Ultimo paso de la salida. Con /data/swan/salida.txt (una cifra) se prueba otra forma de cerrar:
+   0 = SDL_Quit y return (por defecto)   1 = return sin SDL_Quit
+   2 = SDL_Quit y _exit(0)               3 = _exit(0) sin SDL_Quit
+   4 = no cerrar: pantalla fija hasta que se cierre la app con el boton PS */
+static void cierre_final(void) {
+  int modo = 0;
+  FILE *f = fopen("/data/swan/salida.txt", "rb");
+  if (f) {
+    int c = fgetc(f);
+    fclose(f);
+    if (c >= '0' && c <= '4') modo = c - '0';
+  }
+  esp("SALIR: modo de cierre=%d", modo);
+  if (modo == 4) {
+    esp("SALIR: pantalla fija, cierra la app con el boton PS");
+    for (;;) {
+      SDL_PumpEvents();
+      SDL_RenderSetScale(R, 1, 1);
+      SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
+      SDL_RenderClear(R);
+      texto_col(560, 480, 3, 255, 255, 255, "JUEGO CERRADO");
+      texto_col(560, 560, 2, 175, 180, 220, "CIERRA LA APP CON EL BOTON PS");
+      SDL_RenderPresent(R);
+      SDL_Delay(100);
+    }
+  }
+  if (modo == 0 || modo == 2) {
+    esp("SALIR: SDL_Quit...");
+    SDL_Quit();
+    esp("SALIR: SDL_Quit ok");
+  }
+  if (modo == 2 || modo == 3) {
+    esp("SALIR: _exit(0)");
+    _exit(0);
+  }
+  esp("SALIR: return desde main");
+}
+
 int main(void) {
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
@@ -2119,7 +2157,7 @@ int main(void) {
       pausa_menu();
       if (g_salir) {
         salir_del_juego();
-        SDL_Quit();
+        cierre_final();
         return 0;
       }
     }
