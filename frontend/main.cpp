@@ -159,6 +159,8 @@ void retro_set_input_state(int16_t (*cb)(unsigned, unsigned, unsigned, unsigned)
 void retro_init(void);
 bool retro_load_game(const struct retro_game_info *game);
 void retro_run(void);
+void retro_unload_game(void);
+void retro_deinit(void);
 size_t retro_serialize_size(void);
 bool retro_serialize(void *data, size_t size);
 bool retro_unserialize(const void *data, size_t size);
@@ -219,6 +221,7 @@ static char g_ml[12][72];
 static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
+static int g_salir = 0; /* 1 = el usuario pidio salir del juego desde el menu de opciones */
 static char g_juego_id[96] = "juego";
 static unsigned char g_estbuf[40 * 1024 * 1024];
 static int g_cada = 3;
@@ -1059,7 +1062,7 @@ static void dibujar_juego(void) {
   if (g_menu_vis) {
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(R, 0, 0, 40, 220);
-    SDL_Rect pn = {420, 180, 1080, 720};
+    SDL_Rect pn = {420, 180, 1080, 800};
     SDL_RenderFillRect(R, &pn);
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
     SDL_RenderSetScale(R, 3, 3);
@@ -1787,7 +1790,8 @@ static void menu_refrescar(void) {
   snprintf(g_ml[8], sizeof(g_ml[8]), g_s2x ? "Scale2x: Si (sin Bordes/Nitidez)" : "Scale2x: No");
   snprintf(g_ml[9], sizeof(g_ml[9]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
   snprintf(g_ml[10], sizeof(g_ml[10]), "Continuar");
-  g_menu_n = 11;
+  snprintf(g_ml[11], sizeof(g_ml[11]), "Salir del juego");
+  g_menu_n = 12;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -1809,6 +1813,8 @@ static void pausa_menu(void) {
   poll();
   g_menu_toggle = 0;
   unsigned prev = g_mask;
+  int conf = 0;
+  int sel_prev = g_menu_sel;
   for (;;) {
     poll();
     if (g_menu_toggle) { g_menu_toggle = 0; break; }
@@ -1818,6 +1824,7 @@ static void pausa_menu(void) {
     int salir = 0;
     if (nw & (1u << 4)) g_menu_sel = (g_menu_sel + g_menu_n - 1) % g_menu_n;
     if (nw & (1u << 5)) g_menu_sel = (g_menu_sel + 1) % g_menu_n;
+    if (g_menu_sel != sel_prev) { sel_prev = g_menu_sel; conf = 0; g_msg[0] = 0; }
     int dx = ((nw & (1u << 7)) ? 1 : 0) - ((nw & (1u << 6)) ? 1 : 0);
     if (dx != 0) {
       if (g_menu_sel == 2) g_ranura = ((g_ranura - 1 + dx + 4) % 4) + 1;
@@ -1842,6 +1849,10 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 8) s2x_cambiar();
       else if (g_menu_sel == 9) jit_conmutar();
       else if (g_menu_sel == 10) salir = 1;
+      else if (g_menu_sel == 11) {
+        if (conf) { g_salir = 1; salir = 1; }
+        else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para salir del juego"); }
+      }
     }
     menu_refrescar();
     if (salir) break;
@@ -1877,6 +1888,19 @@ static void jit_prueba(void) {
   esp("JIT prueba: ejecutando la funcion de prueba (si el log acaba aqui, ejecutar ahi cierra la app)...");
   int v = ((int (*)(void))g_jit_prueba)();
   esp("JIT prueba: la funcion devolvio %#x (esperado 0x4e36): %s", (unsigned)v, v == 0x4E36 ? "FUNCIONA" : "resultado raro");
+}
+
+/* Cierra el juego y la app. Cada paso queda en espia.txt por si algo se queda colgado */
+static void salir_del_juego(void) {
+  esp("SALIR: cerrando el juego");
+  g_menu_vis = 0;
+  esp("SALIR: retro_unload_game...");
+  retro_unload_game();
+  esp("SALIR: retro_deinit...");
+  retro_deinit();
+  esp("SALIR: listo, cerrando la app");
+  if (g_fd >= 0) close(g_fd);
+  _exit(0);
 }
 
 int main(void) {
@@ -2079,6 +2103,7 @@ int main(void) {
     if (g_menu_toggle) {
       g_menu_toggle = 0;
       pausa_menu();
+      if (g_salir) salir_del_juego();
     }
     i++;
     g_frames = i;
