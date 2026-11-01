@@ -222,6 +222,7 @@ static int g_marco_lin = 1;  /* 1 = filtro lineal; con /data/swan/marco_rapido.t
 #define MARCO_MAX_BANDAS 200
 static struct { short y, h, l, r; } g_bandas[MARCO_MAX_BANDAS]; /* zonas del marco que se mezclan sobre el juego */
 static int g_nbandas = 0;
+static int g_crt = 0; /* efecto CRT (lineas de escaneo): 0 No, 1 Suave, 2 Fuerte */
 static int g_rec_x = 0, g_rec_y = 0; /* recorte por lado, en milesimas (0..200) */
 static int g_xmap[1920];
 static int g_xmap_w = 0, g_xmap_W = 0;
@@ -1019,6 +1020,21 @@ static const uint16_t *pre_aplicar(int w, int h, int W, int H, int *sw, int *sh)
   return aa_aplicar(w, h, W, H, g_aa, g_nit);
 }
 
+/* Efecto CRT: oscurece una de cada 3 filas (lineas de escaneo). Funciona sobre el buffer de 16 bits */
+static void crt_lineas(int W, int H) {
+  int fuerte = (g_crt == 2);
+  for (int y = 2; y < H; y += 3) {
+    uint16_t *d = g_sbuf + (size_t)y * (size_t)W;
+    if (g_pf == 2) {
+      if (fuerte) for (int x = 0; x < W; x++) d[x] = (uint16_t)((d[x] >> 1) & 0x7BEF);
+      else for (int x = 0; x < W; x++) d[x] = (uint16_t)(d[x] - ((d[x] >> 2) & 0x39E7));
+    } else {
+      if (fuerte) for (int x = 0; x < W; x++) d[x] = (uint16_t)(((d[x] >> 1) & 0x3DEF) | (d[x] & 0x8000));
+      else for (int x = 0; x < W; x++) d[x] = (uint16_t)(d[x] - ((d[x] >> 2) & 0x1CE7));
+    }
+  }
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
@@ -1111,6 +1127,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
   }
   }
+  if (g_crt) crt_lineas(W, H);
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
     Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
@@ -1332,27 +1349,31 @@ static void dibujar_juego(void) {
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(R, 0, 0, 40, 220);
     SDL_Rect pn = {420, 180, 1080, 860};
-    int dy = 0;
+    float ox0 = 450.0f, oy0 = 180.0f;
+    int mn = g_menu_n;
+    int LH = (mn > 13) ? 15 : 18;
     if (marco) {
       pn.x = g_marco_hueco.x + 4;
       pn.y = g_marco_hueco.y + 14;
       pn.w = g_marco_hueco.w - 8;
       pn.h = g_marco_hueco.h - 24;
-      dy = -8;
+      ox0 = (float)(g_marco_hueco.x + 40);
+      oy0 = (float)(g_marco_hueco.y + 24);
+      LH = 14;
     }
     SDL_RenderFillRect(R, &pn);
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
     SDL_RenderSetScale(R, 3, 3);
-    texto(150, 60 + dy, "OPCIONES  (L3 o O: cerrar)");
-    int mn = g_menu_n;
-    for (int mi = 0; mi < mn && mi < 14; mi++) {
+    float ox = ox0 / 3.0f, oy = oy0 / 3.0f;
+    texto(ox, oy, "OPCIONES  (L3 o O: cerrar)");
+    for (int mi = 0; mi < mn && mi < 16; mi++) {
       char ml[90];
       snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
-      texto(150, 82 + dy + mi * 18, ml);
+      texto(ox, oy + 22 + mi * LH, ml);
     }
     char mg[90];
     snprintf(mg, sizeof(mg), "%s", g_msg);
-    texto(150, 82 + dy + mn * 18 + 10, mg);
+    texto(ox, oy + 22 + mn * LH + 10, mg);
   }
   double t1 = ahora_us();
   if (!marco || g_splash_debug) {
@@ -2195,6 +2216,14 @@ static void nit_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Nitidez cambiada (no aplica con escala Original)");
 }
 
+static void crt_cambiar(int d) {
+  g_crt = (g_crt + d + 3) % 3;
+  FILE *f = fopen("/data/swan/crt.txt", "wb");
+  if (f) { fputc('0' + g_crt, f); fclose(f); }
+  esp("MENU: crt = %d", g_crt);
+  snprintf(g_msg, sizeof(g_msg), "Efecto CRT cambiado (necesita escala 2x/3x/Maxima o marco)");
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -2209,10 +2238,12 @@ static void menu_refrescar(void) {
   snprintf(g_ml[7], sizeof(g_ml[7]), "Nitidez: %s  (izq/der)", bd[g_nit % 3]);
   snprintf(g_ml[8], sizeof(g_ml[8]), g_s2x ? "Scale2x: Si (sin Bordes/Nitidez)" : "Scale2x: No");
   snprintf(g_ml[9], sizeof(g_ml[9]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
-  snprintf(g_ml[10], sizeof(g_ml[10]), "Continuar");
-  snprintf(g_ml[11], sizeof(g_ml[11]), "Volver al menu de juegos");
-  snprintf(g_ml[12], sizeof(g_ml[12]), "Salir de la app");
-  g_menu_n = 13;
+  const char *cr[3] = {"No", "Suave", "Fuerte"};
+  snprintf(g_ml[10], sizeof(g_ml[10]), "Efecto CRT: %s  (izq/der)", cr[g_crt % 3]);
+  snprintf(g_ml[11], sizeof(g_ml[11]), "Continuar");
+  snprintf(g_ml[12], sizeof(g_ml[12]), "Volver al menu de juegos");
+  snprintf(g_ml[13], sizeof(g_ml[13]), "Salir de la app");
+  g_menu_n = 14;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -2256,6 +2287,7 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 7) nit_cambiar(dx);
       else if (g_menu_sel == 8) s2x_cambiar();
       else if (g_menu_sel == 9) jit_conmutar();
+      else if (g_menu_sel == 10) crt_cambiar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -2269,12 +2301,13 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 7) nit_cambiar(1);
       else if (g_menu_sel == 8) s2x_cambiar();
       else if (g_menu_sel == 9) jit_conmutar();
-      else if (g_menu_sel == 10) salir = 1;
-      else if (g_menu_sel == 11) {
+      else if (g_menu_sel == 10) crt_cambiar(1);
+      else if (g_menu_sel == 11) salir = 1;
+      else if (g_menu_sel == 12) {
         if (conf) { g_volver = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para volver al menu (se cierra el juego)"); }
       }
-      else if (g_menu_sel == 12) {
+      else if (g_menu_sel == 13) {
         if (conf) { g_salir = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para cerrar la app"); }
       }
@@ -2544,6 +2577,15 @@ inicio_menu:;
       if (c >= '0' && c <= '2') g_suav = c - '0';
     }
     esp("SUAVIZADO inicial=%d", g_suav);
+    {
+      FILE *fc = fopen("/data/swan/crt.txt", "rb");
+      if (fc) {
+        int c = fgetc(fc);
+        fclose(fc);
+        if (c >= '0' && c <= '2') g_crt = c - '0';
+      }
+      esp("CRT inicial=%d", g_crt);
+    }
     FILE *fa = fopen("/data/swan/aa.txt", "rb");
     if (fa) {
       int c = fgetc(fa);
