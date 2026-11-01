@@ -222,6 +222,18 @@ static int g_marco_lin = 1;  /* 1 = filtro lineal; con /data/swan/marco_rapido.t
 #define MARCO_MAX_BANDAS 200
 static struct { short y, h, l, r; } g_bandas[MARCO_MAX_BANDAS]; /* zonas del marco que se mezclan sobre el juego */
 static int g_nbandas = 0;
+#define MARCO_MAX 4  /* marco.png, marco2.png, marco3.png, marco4.png */
+typedef struct {
+  SDL_Texture *tex;
+  SDL_Rect hueco;
+  int nb;
+  short b[MARCO_MAX_BANDAS][4];
+  int rx, ry;
+} MarcoDat;
+static MarcoDat g_marcos[MARCO_MAX];
+static int g_nmarcos = 0, g_marco_idx = 0;
+static int g_crt = 0; /* efecto CRT (lineas de escaneo): 0 No, 1 Suave, 2 Fuerte */
+static void marco_ciclar(int d);
 static int g_rec_x = 0, g_rec_y = 0; /* recorte por lado, en milesimas (0..200) */
 static int g_xmap[1920];
 static int g_xmap_w = 0, g_xmap_W = 0;
@@ -230,7 +242,7 @@ static int g_xmap_w = 0, g_xmap_W = 0;
 static volatile int g_menu_toggle = 0;
 static volatile int g_menu_vis = 0;
 static int g_menu_sel = 0, g_menu_n = 0;
-static char g_ml[14][72];
+static char g_ml[16][72];
 static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
@@ -626,7 +638,7 @@ static void poll(void) {
      L3 solo: abre/cierra el menu de opciones */
   if ((nuevos & PB_L3) && (b & PB_L2) && (b & PB_R2)) g_asp = !g_asp;
   else if (nuevos & PB_L3) g_menu_toggle = 1;
-  if ((nuevos & PB_R3) && (b & PB_L2) && (b & PB_R2)) g_marco_on = !g_marco_on;
+  if ((nuevos & PB_R3) && (b & PB_L2) && (b & PB_R2)) marco_ciclar(1);
   else if (nuevos & PB_R3) g_cada = (g_cada == 3) ? 2 : (g_cada == 2 ? 1 : 3);
   g_btn_prev = b;
 }
@@ -1019,6 +1031,21 @@ static const uint16_t *pre_aplicar(int w, int h, int W, int H, int *sw, int *sh)
   return aa_aplicar(w, h, W, H, g_aa, g_nit);
 }
 
+/* Efecto CRT: oscurece una de cada 3 filas (lineas de escaneo). Funciona sobre el buffer de 16 bits */
+static void crt_lineas(int W, int H) {
+  int fuerte = (g_crt == 2);
+  for (int y = 2; y < H; y += 3) {
+    uint16_t *d = g_sbuf + (size_t)y * (size_t)W;
+    if (g_pf == 2) {
+      if (fuerte) for (int x = 0; x < W; x++) d[x] = (uint16_t)((d[x] >> 1) & 0x7BEF);
+      else for (int x = 0; x < W; x++) d[x] = (uint16_t)(d[x] - ((d[x] >> 2) & 0x39E7));
+    } else {
+      if (fuerte) for (int x = 0; x < W; x++) d[x] = (uint16_t)(((d[x] >> 1) & 0x3DEF) | (d[x] & 0x8000));
+      else for (int x = 0; x < W; x++) d[x] = (uint16_t)(d[x] - ((d[x] >> 2) & 0x1CE7));
+    }
+  }
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
@@ -1111,6 +1138,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
   }
   }
+  if (g_crt) crt_lineas(W, H);
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
     Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
@@ -1130,17 +1158,23 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
    es la zona transparente que rodea el centro del PNG. Opcional: /data/swan/marco.txt
    con "x y w h recX recY" (hueco en pixeles de 1920x1080, recorte en milesimas por lado) */
 #ifdef HAY_STBI
-static void cargar_marco(void) {
-  if (g_marco_cargado) return;
-  g_marco_cargado = 1;
-  FILE *f = fopen("/data/swan/marco.png", "rb");
-  if (!f) { esp("MARCO: no hay /data/swan/marco.png"); return; }
+static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
+  g_marco_tex = NULL;
+  g_marco_hueco.x = 0;
+  g_marco_hueco.y = 0;
+  g_marco_hueco.w = 0;
+  g_marco_hueco.h = 0;
+  g_nbandas = 0;
+  g_rec_x = 0;
+  g_rec_y = 0;
+  FILE *f = fopen(ruta_png, "rb");
+  if (!f) { esp("MARCO: no hay %s", ruta_png); return 0; }
   fseek(f, 0, SEEK_END);
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
-  if (sz <= 8 || sz > 12 * 1024 * 1024) { fclose(f); esp("MARCO: tamano raro %ld", sz); return; }
+  if (sz <= 8 || sz > 12 * 1024 * 1024) { fclose(f); esp("MARCO: tamano raro %ld", sz); return 0; }
   unsigned char *datos = (unsigned char *)malloc((size_t)sz);
-  if (!datos) { fclose(f); return; }
+  if (!datos) { fclose(f); return 0; }
   size_t rd = fread(datos, 1, (size_t)sz, f);
   fclose(f);
   int w = 0, h = 0, ch = 0;
@@ -1149,7 +1183,7 @@ static void cargar_marco(void) {
   if (!px || w <= 0 || h <= 0 || (long long)w * h > 16000000LL) {
     esp("MARCO: no se pudo leer el PNG");
     if (px) stbi_image_free(px);
-    return;
+    return 0;
   }
   #define MA(x, y) (px[((size_t)(y) * w + (x)) * 4 + 3])
   int cx = w / 2, cy = h / 2;
@@ -1174,7 +1208,7 @@ static void cargar_marco(void) {
       g_marco_hueco.w = w43;
     }
   }
-  FILE *ft = fopen("/data/swan/marco.txt", "rb");
+  FILE *ft = ruta_txt ? fopen(ruta_txt, "rb") : NULL;
   if (ft) {
     int a = 0, b = 0, c = 0, d = 0, e = 0, g = 0;
     if (fscanf(ft, "%d %d %d %d %d %d", &a, &b, &c, &d, &e, &g) >= 4 && c > 0 && d > 0) {
@@ -1232,9 +1266,82 @@ static void cargar_marco(void) {
   stbi_image_free(px);
   esp("MARCO: %dx%d hueco=%d,%d %dx%d recorte=%d,%d tex=%p bandas=%d lineal=%d", w, h, g_marco_hueco.x, g_marco_hueco.y,
       g_marco_hueco.w, g_marco_hueco.h, g_rec_x, g_rec_y, (void *)g_marco_tex, g_nbandas, g_marco_lin);
+  return g_marco_tex ? 1 : 0;
+}
+
+static void marco_usar(int i) {
+  if (i < 0 || i >= g_nmarcos) return;
+  int on = g_marco_on;
+  g_marco_on = 0; /* el hilo de dibujo no usa el marco mientras se cambia */
+  g_marco_idx = i;
+  g_marco_hueco = g_marcos[i].hueco;
+  g_nbandas = 0;
+  memcpy(g_bandas, g_marcos[i].b, sizeof(g_bandas));
+  g_nbandas = g_marcos[i].nb;
+  g_rec_x = g_marcos[i].rx;
+  g_rec_y = g_marcos[i].ry;
+  g_marco_tex = g_marcos[i].tex;
+  g_marco_on = on;
+}
+
+/* d = +1 / -1: siguiente / anterior. Despues del ultimo marco viene "sin marco" */
+static void marco_ciclar(int d) {
+  int n = g_nmarcos;
+  if (n <= 0) return;
+  int estado = g_marco_on ? g_marco_idx : n;
+  estado = (estado + d + (n + 1)) % (n + 1);
+  if (estado >= n) {
+    g_marco_on = 0;
+  } else {
+    marco_usar(estado);
+    g_marco_on = 1;
+  }
+  FILE *fs = fopen("/data/swan/marco_sel.txt", "wb");
+  if (fs) { fputc('0' + estado, fs); fclose(fs); }
+  esp("MARCO: seleccion %d de %d (activo=%d)", estado, n, g_marco_on);
+}
+
+static void cargar_marco(void) {
+  if (g_marco_cargado) return;
+  g_marco_cargado = 1;
+  static const char *nom[MARCO_MAX] = {"/data/swan/marco.png", "/data/swan/marco2.png",
+                                       "/data/swan/marco3.png", "/data/swan/marco4.png"};
+  for (int i = 0; i < MARCO_MAX; i++) {
+    if (cargar_marco_archivo(nom[i], i == 0 ? "/data/swan/marco.txt" : NULL) && g_nmarcos < MARCO_MAX) {
+      MarcoDat *m = &g_marcos[g_nmarcos];
+      m->tex = g_marco_tex;
+      m->hueco = g_marco_hueco;
+      m->nb = g_nbandas;
+      memcpy(m->b, g_bandas, sizeof(m->b));
+      m->rx = g_rec_x;
+      m->ry = g_rec_y;
+      g_nmarcos++;
+    }
+  }
+  g_marco_tex = NULL;
+  g_nbandas = 0;
+  if (g_nmarcos > 0) {
+    int estado = 0;
+    FILE *fs = fopen("/data/swan/marco_sel.txt", "rb");
+    if (fs) {
+      int c = fgetc(fs);
+      fclose(fs);
+      if (c >= '0' && c <= '9') estado = c - '0';
+      if (estado > g_nmarcos) estado = 0;
+    }
+    if (estado >= g_nmarcos) {
+      marco_usar(0);
+      g_marco_on = 0;
+    } else {
+      marco_usar(estado);
+      g_marco_on = 1;
+    }
+  }
+  esp("MARCO: %d marcos cargados, activo=%d", g_nmarcos, g_marco_on);
 }
 #else
 static void cargar_marco(void) {}
+static void marco_ciclar(int d) { (void)d; }
 #endif
 
 /* Pantalla de juego: modo 0 original, 1 = 2x, 2 = 3x, 3 = maximo */
@@ -1332,27 +1439,31 @@ static void dibujar_juego(void) {
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(R, 0, 0, 40, 220);
     SDL_Rect pn = {420, 180, 1080, 860};
-    int dy = 0;
+    float ox0 = 450.0f, oy0 = 180.0f;
+    int mn = g_menu_n;
+    int LH = (mn > 13) ? 15 : 18;
     if (marco) {
       pn.x = g_marco_hueco.x + 4;
       pn.y = g_marco_hueco.y + 14;
       pn.w = g_marco_hueco.w - 8;
       pn.h = g_marco_hueco.h - 24;
-      dy = -8;
+      ox0 = (float)(g_marco_hueco.x + 40);
+      oy0 = (float)(g_marco_hueco.y + 24);
+      LH = 14;
     }
     SDL_RenderFillRect(R, &pn);
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
     SDL_RenderSetScale(R, 3, 3);
-    texto(150, 60 + dy, "OPCIONES  (L3 o O: cerrar)");
-    int mn = g_menu_n;
-    for (int mi = 0; mi < mn && mi < 14; mi++) {
+    float ox = ox0 / 3.0f, oy = oy0 / 3.0f;
+    texto(ox, oy, "OPCIONES  (L3 o O: cerrar)");
+    for (int mi = 0; mi < mn && mi < 16; mi++) {
       char ml[90];
       snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
-      texto(150, 82 + dy + mi * 18, ml);
+      texto(ox, oy + 22 + mi * LH, ml);
     }
     char mg[90];
     snprintf(mg, sizeof(mg), "%s", g_msg);
-    texto(150, 82 + dy + mn * 18 + 10, mg);
+    texto(ox, oy + 22 + mn * LH + 10, mg);
   }
   double t1 = ahora_us();
   if (!marco || g_splash_debug) {
@@ -2195,6 +2306,14 @@ static void nit_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Nitidez cambiada (no aplica con escala Original)");
 }
 
+static void crt_cambiar(int d) {
+  g_crt = (g_crt + d + 3) % 3;
+  FILE *f = fopen("/data/swan/crt.txt", "wb");
+  if (f) { fputc('0' + g_crt, f); fclose(f); }
+  esp("MENU: crt = %d", g_crt);
+  snprintf(g_msg, sizeof(g_msg), "Efecto CRT cambiado (necesita escala 2x/3x/Maxima o marco)");
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -2209,10 +2328,15 @@ static void menu_refrescar(void) {
   snprintf(g_ml[7], sizeof(g_ml[7]), "Nitidez: %s  (izq/der)", bd[g_nit % 3]);
   snprintf(g_ml[8], sizeof(g_ml[8]), g_s2x ? "Scale2x: Si (sin Bordes/Nitidez)" : "Scale2x: No");
   snprintf(g_ml[9], sizeof(g_ml[9]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
-  snprintf(g_ml[10], sizeof(g_ml[10]), "Continuar");
-  snprintf(g_ml[11], sizeof(g_ml[11]), "Volver al menu de juegos");
-  snprintf(g_ml[12], sizeof(g_ml[12]), "Salir de la app");
-  g_menu_n = 13;
+  const char *cr[3] = {"No", "Suave", "Fuerte"};
+  snprintf(g_ml[10], sizeof(g_ml[10]), "Efecto CRT: %s  (izq/der)", cr[g_crt % 3]);
+  if (g_nmarcos <= 0) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: no hay marco.png");
+  else if (!g_marco_on) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: Ninguno  (izq/der)");
+  else snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: %d de %d  (izq/der)", g_marco_idx + 1, g_nmarcos);
+  snprintf(g_ml[12], sizeof(g_ml[12]), "Continuar");
+  snprintf(g_ml[13], sizeof(g_ml[13]), "Volver al menu de juegos");
+  snprintf(g_ml[14], sizeof(g_ml[14]), "Salir de la app");
+  g_menu_n = 15;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -2256,6 +2380,8 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 7) nit_cambiar(dx);
       else if (g_menu_sel == 8) s2x_cambiar();
       else if (g_menu_sel == 9) jit_conmutar();
+      else if (g_menu_sel == 10) crt_cambiar(dx);
+      else if (g_menu_sel == 11) marco_ciclar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -2269,12 +2395,14 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 7) nit_cambiar(1);
       else if (g_menu_sel == 8) s2x_cambiar();
       else if (g_menu_sel == 9) jit_conmutar();
-      else if (g_menu_sel == 10) salir = 1;
-      else if (g_menu_sel == 11) {
+      else if (g_menu_sel == 10) crt_cambiar(1);
+      else if (g_menu_sel == 11) marco_ciclar(1);
+      else if (g_menu_sel == 12) salir = 1;
+      else if (g_menu_sel == 13) {
         if (conf) { g_volver = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para volver al menu (se cierra el juego)"); }
       }
-      else if (g_menu_sel == 12) {
+      else if (g_menu_sel == 14) {
         if (conf) { g_salir = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para cerrar la app"); }
       }
@@ -2544,6 +2672,15 @@ inicio_menu:;
       if (c >= '0' && c <= '2') g_suav = c - '0';
     }
     esp("SUAVIZADO inicial=%d", g_suav);
+    {
+      FILE *fc = fopen("/data/swan/crt.txt", "rb");
+      if (fc) {
+        int c = fgetc(fc);
+        fclose(fc);
+        if (c >= '0' && c <= '2') g_crt = c - '0';
+      }
+      esp("CRT inicial=%d", g_crt);
+    }
     FILE *fa = fopen("/data/swan/aa.txt", "rb");
     if (fa) {
       int c = fgetc(fa);
