@@ -2208,6 +2208,38 @@ static void cargar_fondo_opc(void) {
 static void cargar_fondo_opc(void) {}
 #endif
 
+/* Caja de CD alrededor de la portada: /data/swan/marco_portada.png. Su hueco transparente calza con el cuadro
+   de la portada (396x399 en x=1236, y=229). Opcional: /data/swan/marco_portada.txt con "x y ancho alto"
+   (en pixeles de 1920x1080) para moverla o cambiarle el tamano sin recompilar. */
+static SDL_Texture *g_marco_port = NULL;
+static SDL_Rect g_port_dst = {0, 0, 0, 0};
+static int g_port_probado = 0;
+#ifdef HAY_STBI
+static void cargar_marco_portada(void) {
+  if (g_port_probado) return;
+  g_port_probado = 1;
+  g_marco_port = png_a_textura("/data/swan/marco_portada.png");
+  if (!g_marco_port) { esp("MENU: no hay /data/swan/marco_portada.png"); return; }
+  int w = 0, h = 0;
+  SDL_QueryTexture(g_marco_port, NULL, NULL, &w, &h);
+  g_port_dst.x = 1236 - 113;
+  g_port_dst.y = 229 - 9;
+  g_port_dst.w = w;
+  g_port_dst.h = h;
+  FILE *f = fopen("/data/swan/marco_portada.txt", "rb");
+  if (f) {
+    int a = 0, b = 0, c = 0, d = 0;
+    if (fscanf(f, "%d %d %d %d", &a, &b, &c, &d) == 4 && c > 0 && d > 0) {
+      g_port_dst.x = a; g_port_dst.y = b; g_port_dst.w = c; g_port_dst.h = d;
+    }
+    fclose(f);
+  }
+  esp("MENU: marco de portada %dx%d en %d,%d (%dx%d)", w, h, g_port_dst.x, g_port_dst.y, g_port_dst.w, g_port_dst.h);
+}
+#else
+static void cargar_marco_portada(void) { g_port_probado = 1; }
+#endif
+
 /* posiciones medidas sobre el fondo (1920x1080) */
 #define PS_LX 292     /* barra de seleccion: x */
 #define PS_LW 856     /* ancho */
@@ -2243,6 +2275,11 @@ static void dibujar_menu(int sel, int top) {
   /* caratula dentro del marco de la derecha */
   const int CX = 1236, CY = 229, CW = 396, CH = 399;
   int con_cov = 0;
+  if (g_marco_port) {
+    SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
+    SDL_Rect fondo_port = {CX, CY, CW, CH};
+    SDL_RenderFillRect(R, &fondo_port);
+  }
 #ifdef HAY_STBI
   portada_actualizar(sel, CW - 8, CH - 8);
   con_cov = (g_cov_hay >= 0);
@@ -2252,6 +2289,7 @@ static void dibujar_menu(int sel, int top) {
   }
 #endif
   if (!con_cov) texto_col(CX + 62, CY + 180, 3, 120, 130, 190, "SIN PORTADA");
+  if (g_marco_port) SDL_RenderCopy(R, g_marco_port, NULL, &g_port_dst);
 
   /* nombre del juego (hasta 3 lineas) y contador */
   char full[128];
@@ -2290,6 +2328,7 @@ static void dibujar_menu(int sel, int top) {
 
 static int elegir_juego(char *out, size_t outn) {
   cargar_fondo_opc();
+  cargar_marco_portada();
   int n = listar_juegos();
   if (n <= 0) return 0;
 
