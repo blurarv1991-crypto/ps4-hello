@@ -222,7 +222,7 @@ static int g_marco_lin = 1;  /* 1 = filtro lineal; con /data/swan/marco_rapido.t
 #define MARCO_MAX_BANDAS 200
 static struct { short y, h, l, r; } g_bandas[MARCO_MAX_BANDAS]; /* zonas del marco que se mezclan sobre el juego */
 static int g_nbandas = 0;
-#define MARCO_MAX 4  /* marco.png, marco2.png, marco3.png, marco4.png (solo uno en memoria a la vez) */
+#define MARCO_MAX 5  /* marco.png, marco2.png ... marco5.png (solo uno en memoria a la vez) */
 static int g_nmarcos = 0, g_marco_idx = 0;
 static int g_crt = 0; /* efecto CRT (lineas de escaneo): 0 No, 1 Suave, 2 Fuerte */
 static int g_color = 0;           /* filtro de color: 0 Original, 1 Natural, 2 Vivido, 3 Calido, 4 Retro */
