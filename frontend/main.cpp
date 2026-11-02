@@ -1961,6 +1961,66 @@ static void nombre_bonito(const char *src, char *dst, size_t n, size_t maxc) {
   }
 }
 
+/* funciones del menu de opciones (definidas mas abajo) */
+static void suav_cambiar(int d);
+static void aa_cambiar(int d);
+static void nit_cambiar(int d);
+static void s2x_cambiar(void);
+static void jit_conmutar(void);
+static void crt_cambiar(int d);
+static void color_cambiar(int d);
+static void fps_cambiar(void);
+static void calidad_cambiar(int d);
+static void menu_refrescar(void);
+
+/* ---- Opciones antes de entrar al juego (triangulo en el menu de juegos) ---- */
+static int g_pop_vis = 0, g_pop_sel = 0;
+#define POP_N 13
+/* lineas de menu_refrescar() que valen sin juego cargado (Escala ... Calidad, Continuar) */
+static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+
+static void pop_ajustar(int idx, int dx) {
+  g_msg[0] = 0;
+  switch (idx) {
+    case 3: g_modo = (g_modo + dx + 4) % 4; break;
+    case 4: g_asp = !g_asp; break;
+    case 5: suav_cambiar(dx); break;
+    case 6: aa_cambiar(dx); break;
+    case 7: nit_cambiar(dx); break;
+    case 8: s2x_cambiar(); break;
+    case 9: jit_conmutar(); break;
+    case 10: crt_cambiar(dx); break;
+    case 11: marco_ciclar(dx); break;
+    case 12: color_cambiar(dx); break;
+    case 13: fps_cambiar(); break;
+    case 14: calidad_cambiar(dx); break;
+    default: break;
+  }
+  menu_refrescar();
+}
+
+static void dibujar_popup_opciones(void) {
+  if (!g_pop_vis) return;
+  menu_refrescar();
+  const int PW = 900, PH = 860, PX = (1920 - PW) / 2, PY = 100;
+  panel(PX, PY, PW, PH, 14, 10, 14, 60, 235);
+  texto_col(PX + 40, PY + 24, 4, 240, 190, 0, "OPCIONES");
+  texto_col(PX + 40, PY + 74, 2, 175, 180, 220, "TRIANGULO O O: CERRAR   X: CAMBIAR   IZQ/DER: AJUSTAR");
+  for (int k = 0; k < POP_N; k++) {
+    int y = PY + 120 + k * 50;
+    const char *t = g_ml[POP_IDX[k]];
+    if (k == g_pop_sel) {
+      SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
+      SDL_Rect bar = {PX + 24, y, PW - 48, 46};
+      SDL_RenderFillRect(R, &bar);
+      texto_col(PX + 44, y + 10, 3, 20, 20, 40, t);
+    } else {
+      texto_col(PX + 44, y + 10, 3, 255, 255, 255, t);
+    }
+  }
+  texto_col(PX + 40, PY + PH - 40, 2, 255, 255, 255, g_msg);
+}
+
 static void dibujar_menu_clasico(int sel, int top) {
   SDL_RenderSetScale(R, 1, 1);
   /* fondo con degradado vertical */
@@ -2062,7 +2122,8 @@ static void dibujar_menu_clasico(int sel, int top) {
   panel(80, 1000, 70, 40, 12, 120, 100, 255, 255);
   texto_col(94, 1010, 3, 255, 255, 255, "X");
   texto_col(170, 1010, 3, 255, 255, 255, "JUGAR");
-  texto_col(430, 1010, 3, 175, 180, 220, "ARRIBA / ABAJO: MOVER");
+  texto_col(430, 1010, 3, 175, 180, 220, "ARRIBA / ABAJO: MOVER   TRIANGULO: OPCIONES");
+  dibujar_popup_opciones();
   SDL_RenderPresent(R);
 }
 
@@ -2178,6 +2239,7 @@ static void dibujar_menu(int sel, int top) {
   char t[64];
   snprintf(t, sizeof(t), "JUEGO %d DE %d", sel + 1, g_nj);
   texto_col(1249, 858, 3, 255, 255, 255, t);
+  dibujar_popup_opciones();
   SDL_RenderPresent(R);
 }
 
@@ -2221,6 +2283,41 @@ static int elegir_juego(char *out, size_t outn) {
         b = d.buttons;
         y = d.leftStick.y;
       }
+      uint32_t nuevos = b & ~prev;
+      prev = b;
+      if (g_pop_vis) {
+        /* panel de opciones abierto: la lista de juegos no se mueve y X no entra al juego */
+        int dv = 0;
+        if ((b & PB_DOWN) || y > 192) dv = 1;
+        if ((b & PB_UP) || y < 64) dv = -1;
+        if (dv != 0 && dv != dir_prev) {
+          g_pop_sel = (g_pop_sel + dv + POP_N) % POP_N;
+          g_msg[0] = 0;
+        }
+        dir_prev = dv;
+        int dx = ((nuevos & PB_RIGHT) ? 1 : 0) - ((nuevos & PB_LEFT) ? 1 : 0);
+        int idx = POP_IDX[g_pop_sel];
+        if (dx != 0) pop_ajustar(idx, dx);
+        if (nuevos & PB_CROSS) {
+          if (idx == 15) g_pop_vis = 0;
+          else pop_ajustar(idx, 1);
+        }
+        if (nuevos & (PB_TRIANGLE | PB_CIRCLE | PB_L3)) g_pop_vis = 0;
+        dibujar_menu(sel, top);
+        SDL_Delay(16);
+        continue;
+      }
+      if (nuevos & PB_TRIANGLE) {
+        cargar_marco(); /* para que "Marco" funcione tambien antes de entrar al juego */
+        g_pop_vis = 1;
+        g_pop_sel = 0;
+        g_msg[0] = 0;
+        menu_refrescar();
+        dir_prev = 1; /* evita que un stick o cruceta ya mantenido mueva el panel al abrirlo */
+        dibujar_menu(sel, top);
+        SDL_Delay(16);
+        continue;
+      }
       int dir = 0;
       if ((b & PB_DOWN) || y > 192) dir = 1;
       if ((b & PB_UP) || y < 64) dir = -1;
@@ -2235,8 +2332,6 @@ static int elegir_juego(char *out, size_t outn) {
         }
       }
       dir_prev = dir;
-      uint32_t nuevos = b & ~prev;
-      prev = b;
       if (nuevos & PB_CROSS) break;
       if (sel < top) top = sel;
       if (sel >= top + MENU_VIS) top = sel - (MENU_VIS - 1);
@@ -2449,7 +2544,7 @@ static void menu_refrescar(void) {
     else snprintf(g_ml[14], sizeof(g_ml[14]), "Calidad: Personalizada  (izq/der)");
   }
   snprintf(g_ml[15], sizeof(g_ml[15]), "Continuar");
-  snprintf(g_ml[16], sizeof(g_ml[16]), "Volver al menu de juegos");
+  snprintf(g_ml[16], sizeof(g_ml[16]), "Volver al menu de juegos  (triangulo)");
   snprintf(g_ml[17], sizeof(g_ml[17]), "Salir de la app");
   g_menu_n = 18;
 }
@@ -2474,6 +2569,7 @@ static void pausa_menu(void) {
   g_menu_toggle = 0;
   unsigned prev = g_mask;
   int conf = 0;
+  int ct = 0; /* 1 = ya se pulso triangulo una vez (pide confirmar) */
   int sel_prev = g_menu_sel;
   for (;;) {
     poll();
@@ -2484,9 +2580,10 @@ static void pausa_menu(void) {
     int salir = 0;
     if (nw & (1u << 4)) g_menu_sel = (g_menu_sel + g_menu_n - 1) % g_menu_n;
     if (nw & (1u << 5)) g_menu_sel = (g_menu_sel + 1) % g_menu_n;
-    if (g_menu_sel != sel_prev) { sel_prev = g_menu_sel; conf = 0; g_msg[0] = 0; }
+    if (g_menu_sel != sel_prev) { sel_prev = g_menu_sel; conf = 0; ct = 0; g_msg[0] = 0; }
     int dx = ((nw & (1u << 7)) ? 1 : 0) - ((nw & (1u << 6)) ? 1 : 0);
     if (dx != 0) {
+      ct = 0;
       if (g_menu_sel == 2) g_ranura = ((g_ranura - 1 + dx + 4) % 4) + 1;
       else if (g_menu_sel == 3) g_modo = (g_modo + dx + 4) % 4;
       else if (g_menu_sel == 4) g_asp = !g_asp;
@@ -2502,7 +2599,12 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 14) calidad_cambiar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
+    if (nw & (1u << 9)) {
+      if (ct) { g_volver = 1; salir = 1; }
+      else { ct = 1; snprintf(g_msg, sizeof(g_msg), "Triangulo otra vez: volver al menu (se cierra el juego)"); }
+    }
     if (nw & (1u << 0)) {
+      ct = 0;
       if (g_menu_sel == 0) estado_guardar();
       else if (g_menu_sel == 1) estado_cargar();
       else if (g_menu_sel == 2) g_ranura = (g_ranura % 4) + 1;
