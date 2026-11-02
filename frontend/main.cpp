@@ -231,6 +231,10 @@ static int g_lut_listo = -1;      /* filtro para el que esta calculada g_lut */
 static int g_lut_pf = -1;         /* formato de pixel para el que esta calculada */
 static int g_fps_on = 0;          /* mostrar FPS en pantalla */
 static void marco_ciclar(int d);
+/* Candado: evita que el hilo principal destruya/recargue el marco mientras el hilo de dibujo lo usa */
+static SDL_mutex *g_marco_mx = NULL;
+static void marco_lock(void) { if (g_marco_mx) SDL_LockMutex(g_marco_mx); }
+static void marco_unlock(void) { if (g_marco_mx) SDL_UnlockMutex(g_marco_mx); }
 static int g_rec_x = 0, g_rec_y = 0; /* recorte por lado, en milesimas (0..200) */
 static int g_xmap[1920];
 static int g_xmap_w = 0, g_xmap_W = 0;
@@ -1178,7 +1182,12 @@ static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
   int w = 0, h = 0, ch = 0;
   unsigned char *px = (rd == (size_t)sz) ? stbi_load_from_memory(datos, (int)sz, &w, &h, &ch, 4) : NULL;
   free(datos);
-  if (!px || w <= 0 || h <= 0 || (long long)w * h > 16000000LL) {
+  if (px && (long long)w * h > 2600000LL) {
+    esp("MARCO: PNG demasiado grande (%dx%d). Usa 1920x1080 maximo: %s", w, h, ruta_png);
+    stbi_image_free(px);
+    return 0;
+  }
+  if (!px || w <= 0 || h <= 0) {
     esp("MARCO: no se pudo leer el PNG");
     if (px) stbi_image_free(px);
     return 0;
@@ -1205,6 +1214,12 @@ static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
       g_marco_hueco.x += (g_marco_hueco.w - w43) / 2;
       g_marco_hueco.w = w43;
     }
+    /* hueco mucho mas alto que 4:3 (ej. caja de CD): el juego se centra en vertical y no se estira */
+    int h43 = g_marco_hueco.w * 3 / 4;
+    if (g_marco_hueco.h * 100 > h43 * 105) {
+      g_marco_hueco.y += (g_marco_hueco.h - h43) / 2;
+      g_marco_hueco.h = h43;
+    }
   }
   FILE *ft = ruta_txt ? fopen(ruta_txt, "rb") : NULL;
   if (ft) {
@@ -1215,6 +1230,17 @@ static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
       if (g >= 0 && g <= 200) g_rec_y = g;
     }
     fclose(ft);
+  }
+  if (g_marco_hueco.w > 0 && g_marco_hueco.h > 0) {
+    if (g_marco_hueco.x < 0) g_marco_hueco.x = 0;
+    if (g_marco_hueco.y < 0) g_marco_hueco.y = 0;
+    if (g_marco_hueco.x + g_marco_hueco.w > 1920) g_marco_hueco.w = 1920 - g_marco_hueco.x;
+    if (g_marco_hueco.y + g_marco_hueco.h > 1080) g_marco_hueco.h = 1080 - g_marco_hueco.y;
+    if (g_marco_hueco.w < 64 || g_marco_hueco.h < 48) {
+      esp("MARCO: hueco invalido %d,%d %dx%d", g_marco_hueco.x, g_marco_hueco.y, g_marco_hueco.w, g_marco_hueco.h);
+      g_marco_hueco.w = 0;
+      g_marco_hueco.h = 0;
+    }
   }
   {
     FILE *fr = fopen("/data/swan/marco_rapido.txt", "rb");
@@ -1275,7 +1301,6 @@ static void marco_ruta(int i, char *buf, size_t n) {
 static void marco_liberar(void) {
   g_marco_on = 0;
   if (g_marco_tex) {
-    SDL_Delay(80); /* el hilo de dibujo termina el cuadro en curso */
     SDL_DestroyTexture(g_marco_tex);
     g_marco_tex = NULL;
   }
@@ -1285,16 +1310,23 @@ static void marco_liberar(void) {
 static int marco_cargar_idx(int i) {
   char ruta[64];
   marco_ruta(i, ruta, sizeof(ruta));
+  marco_lock();
   marco_liberar();
-  if (!cargar_marco_archivo(ruta, i == 0 ? "/data/swan/marco.txt" : NULL)) return 0;
-  g_marco_idx = i;
-  return 1;
+  /* marca: si la app se cierra durante la carga, al abrir de nuevo se salta el marco */
+  FILE *fm = fopen("/data/swan/marco_crash.txt", "wb");
+  if (fm) { fputc('1', fm); fclose(fm); }
+  int ok = cargar_marco_archivo(ruta, i == 0 ? "/data/swan/marco.txt" : NULL);
+  remove("/data/swan/marco_crash.txt");
+  if (ok) g_marco_idx = i;
+  marco_unlock();
+  return ok;
 }
 
 /* d = +1 / -1: siguiente / anterior. Despues del ultimo marco viene "sin marco" */
 static void marco_ciclar(int d) {
   int n = g_nmarcos;
   if (n <= 0) return;
+  marco_lock();
   int estado = g_marco_on ? g_marco_idx : n;
   estado = (estado + d + (n + 1)) % (n + 1);
   if (estado >= n) {
@@ -1305,11 +1337,13 @@ static void marco_ciclar(int d) {
   FILE *fs = fopen("/data/swan/marco_sel.txt", "wb");
   if (fs) { fputc('0' + estado, fs); fclose(fs); }
   esp("MARCO: seleccion %d de %d (activo=%d)", estado, n, g_marco_on);
+  marco_unlock();
 }
 
 static void cargar_marco(void) {
   if (g_marco_cargado) return;
   g_marco_cargado = 1;
+  if (!g_marco_mx) g_marco_mx = SDL_CreateMutex();
   g_nmarcos = 0;
   while (g_nmarcos < MARCO_MAX) {
     char ruta[64];
@@ -1327,6 +1361,14 @@ static void cargar_marco(void) {
       if (c >= '0' && c <= '9') estado = c - '0';
       if (estado > g_nmarcos) estado = 0;
     }
+    if (existe("/data/swan/marco_crash.txt")) {
+      /* la vez anterior la app se cerro cargando un marco: arrancar sin marco */
+      remove("/data/swan/marco_crash.txt");
+      esp("MARCO: la carga anterior fallo; arrancando sin marco");
+      estado = g_nmarcos;
+      FILE *fs2 = fopen("/data/swan/marco_sel.txt", "wb");
+      if (fs2) { fputc('0' + estado, fs2); fclose(fs2); }
+    }
     if (estado < g_nmarcos && marco_cargar_idx(estado)) g_marco_on = 1;
   }
   esp("MARCO: %d marcos, activo=%d", g_nmarcos, g_marco_on);
@@ -1337,7 +1379,7 @@ static void marco_ciclar(int d) { (void)d; }
 #endif
 
 /* Pantalla de juego: modo 0 original, 1 = 2x, 2 = 3x, 3 = maximo */
-static void dibujar_juego(void) {
+static void dibujar_juego_interno(void) {
   double t0 = ahora_us();
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
   SDL_RenderClear(R);
@@ -1521,6 +1563,12 @@ static void dibujar_juego(void) {
   a_cop += t1 - t0;
   a_pre += t3 - t2;
   n_dib++;
+}
+
+static void dibujar_juego(void) {
+  marco_lock();
+  dibujar_juego_interno();
+  marco_unlock();
 }
 
 static void esperar(int frames) {
