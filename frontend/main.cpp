@@ -225,6 +225,11 @@ static int g_nbandas = 0;
 #define MARCO_MAX 4  /* marco.png, marco2.png, marco3.png, marco4.png (solo uno en memoria a la vez) */
 static int g_nmarcos = 0, g_marco_idx = 0;
 static int g_crt = 0; /* efecto CRT (lineas de escaneo): 0 No, 1 Suave, 2 Fuerte */
+static int g_color = 0;           /* filtro de color: 0 Original, 1 Natural, 2 Vivido, 3 Calido, 4 Retro */
+static uint16_t g_lut[65536];     /* tabla de color para pixeles de 16 bits */
+static int g_lut_listo = -1;      /* filtro para el que esta calculada g_lut */
+static int g_lut_pf = -1;         /* formato de pixel para el que esta calculada */
+static int g_fps_on = 0;          /* mostrar FPS en pantalla */
 static void marco_ciclar(int d);
 static int g_rec_x = 0, g_rec_y = 0; /* recorte por lado, en milesimas (0..200) */
 static int g_xmap[1920];
@@ -234,7 +239,7 @@ static int g_xmap_w = 0, g_xmap_W = 0;
 static volatile int g_menu_toggle = 0;
 static volatile int g_menu_vis = 0;
 static int g_menu_sel = 0, g_menu_n = 0;
-static char g_ml[16][72];
+static char g_ml[20][72];
 static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
@@ -1427,7 +1432,7 @@ static void dibujar_juego(void) {
     SDL_Rect pn = {420, 180, 1080, 860};
     float ox0 = 450.0f, oy0 = 180.0f;
     int mn = g_menu_n;
-    int LH = (mn > 13) ? 15 : 18;
+    int LH = (mn > 16) ? 13 : ((mn > 13) ? 15 : 18);
     if (marco) {
       pn.x = g_marco_hueco.x + 4;
       pn.y = g_marco_hueco.y + 14;
@@ -1435,14 +1440,14 @@ static void dibujar_juego(void) {
       pn.h = g_marco_hueco.h - 24;
       ox0 = (float)(g_marco_hueco.x + 40);
       oy0 = (float)(g_marco_hueco.y + 24);
-      LH = 14;
+      LH = (mn > 16) ? 12 : 14;
     }
     SDL_RenderFillRect(R, &pn);
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
     SDL_RenderSetScale(R, 3, 3);
     float ox = ox0 / 3.0f, oy = oy0 / 3.0f;
     texto(ox, oy, "OPCIONES  (L3 o O: cerrar)");
-    for (int mi = 0; mi < mn && mi < 16; mi++) {
+    for (int mi = 0; mi < mn && mi < 20; mi++) {
       char ml[90];
       snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
       texto(ox, oy + 22 + mi * LH, ml);
@@ -1452,6 +1457,25 @@ static void dibujar_juego(void) {
     texto(ox, oy + 22 + mn * LH + 10, mg);
   }
   double t1 = ahora_us();
+  if (g_fps_on) {
+    static double t_fps = 0.0;
+    static int f_fps = 0;
+    static int v_fps = 0;
+    double tn = ahora_us();
+    if (t_fps == 0.0) {
+      t_fps = tn;
+      f_fps = g_frames;
+    } else if (tn - t_fps >= 1000000.0) {
+      v_fps = (int)((double)(g_frames - f_fps) * 1000000.0 / (tn - t_fps) + 0.5);
+      f_fps = g_frames;
+      t_fps = tn;
+    }
+    char tf[24];
+    snprintf(tf, sizeof(tf), "FPS %d", v_fps);
+    SDL_RenderSetScale(R, 2, 2);
+    if (marco) texto((float)(g_marco_hueco.x + 24) / 2.0f, (float)(g_marco_hueco.y + 14) / 2.0f, tf);
+    else texto(10.0f, 8.0f, tf);
+  }
   if (!marco || g_splash_debug) {
     SDL_RenderSetScale(R, 2, 2);
     char t[240];
@@ -1481,14 +1505,67 @@ static void paso(const char *s) {
   esperar(60);
 }
 
+static float color_lim(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+/* Calcula g_lut para el filtro g_color y el formato de pixel g_pf (sin libm: solo sumas y productos) */
+static void color_construir(void) {
+  float sat = 1.0f, con = 0.0f, rm = 1.0f, gm = 1.0f, bm = 1.0f, lift = 0.0f, bri = 1.0f;
+  switch (g_color) {
+    case 1: sat = 1.18f; con = 0.12f; break;                                             /* natural mejorado */
+    case 2: sat = 1.45f; con = 0.22f; bri = 1.02f; break;                                /* vivido */
+    case 3: sat = 1.12f; con = 0.08f; rm = 1.07f; gm = 1.02f; bm = 0.90f; break;         /* calido */
+    case 4: sat = 0.82f; con = 0.10f; rm = 1.05f; bm = 0.92f; lift = 0.03f; break;       /* retro */
+    default: break;
+  }
+  int pf = g_pf;
+  for (int v = 0; v < 65536; v++) {
+    float fr, fg, fb;
+    if (pf == 2) {
+      fr = (float)((v >> 11) & 31) / 31.0f;
+      fg = (float)((v >> 5) & 63) / 63.0f;
+      fb = (float)(v & 31) / 31.0f;
+    } else {
+      fr = (float)((v >> 10) & 31) / 31.0f;
+      fg = (float)((v >> 5) & 31) / 31.0f;
+      fb = (float)(v & 31) / 31.0f;
+    }
+    float y = 0.299f * fr + 0.587f * fg + 0.114f * fb;
+    fr = color_lim(y + (fr - y) * sat);
+    fg = color_lim(y + (fg - y) * sat);
+    fb = color_lim(y + (fb - y) * sat);
+    fr = fr + con * (fr * fr * (3.0f - 2.0f * fr) - fr);
+    fg = fg + con * (fg * fg * (3.0f - 2.0f * fg) - fg);
+    fb = fb + con * (fb * fb * (3.0f - 2.0f * fb) - fb);
+    fr = color_lim(fr * rm * bri + lift);
+    fg = color_lim(fg * gm * bri + lift);
+    fb = color_lim(fb * bm * bri + lift);
+    if (pf == 2) {
+      g_lut[v] = (uint16_t)(((int)(fr * 31.0f + 0.5f) << 11) | ((int)(fg * 63.0f + 0.5f) << 5) | (int)(fb * 31.0f + 0.5f));
+    } else {
+      g_lut[v] = (uint16_t)((v & 0x8000) | ((int)(fr * 31.0f + 0.5f) << 10) | ((int)(fg * 31.0f + 0.5f) << 5) | (int)(fb * 31.0f + 0.5f));
+    }
+  }
+  g_lut_listo = g_color;
+  g_lut_pf = pf;
+}
+
 /* Copia el ultimo cuadro del nucleo a g_snap (solo 16 bits por pixel) */
 static int tomar_cuadro(void) {
   if (!g_dp || g_dw == 0 || g_dh == 0) return 0;
   if (g_pf != 2 && g_pf != 0) return 0;
   if ((size_t)g_dw * (size_t)g_dh > (size_t)(1920 * 1080)) return 0;
   const unsigned char *src = (const unsigned char *)g_dp;
-  for (unsigned y = 0; y < g_dh; y++) {
-    memcpy(g_snap + (size_t)y * g_dw, src + (size_t)y * g_dpitch, (size_t)g_dw * 2);
+  if (g_color) {
+    if (g_lut_listo != g_color || g_lut_pf != g_pf) color_construir();
+    for (unsigned y = 0; y < g_dh; y++) {
+      const uint16_t *sp = (const uint16_t *)(src + (size_t)y * g_dpitch);
+      uint16_t *dp = g_snap + (size_t)y * g_dw;
+      for (unsigned x = 0; x < g_dw; x++) dp[x] = g_lut[sp[x]];
+    }
+  } else {
+    for (unsigned y = 0; y < g_dh; y++) {
+      memcpy(g_snap + (size_t)y * g_dw, src + (size_t)y * g_dpitch, (size_t)g_dw * 2);
+    }
   }
   g_sw = g_dw;
   g_sh = g_dh;
@@ -2300,6 +2377,48 @@ static void crt_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Efecto CRT cambiado (necesita escala 2x/3x/Maxima o marco)");
 }
 
+static void guardar_num(const char *ruta, int v) {
+  FILE *f = fopen(ruta, "wb");
+  if (f) { fputc('0' + v, f); fclose(f); }
+}
+
+static void color_cambiar(int d) {
+  g_color = (g_color + d + 5) % 5;
+  guardar_num("/data/swan/color.txt", g_color);
+  esp("MENU: color = %d", g_color);
+  snprintf(g_msg, sizeof(g_msg), "Filtro de color cambiado");
+}
+
+static void fps_cambiar(void) {
+  g_fps_on = !g_fps_on;
+  guardar_num("/data/swan/fps.txt", g_fps_on);
+  esp("MENU: fps = %d", g_fps_on);
+}
+
+/* Calidad: 0 Mejor, 1 Equilibrada, 2 Rapida. Devuelve -1 si los ajustes no coinciden con ninguna */
+static int calidad_actual(void) {
+  if (g_suav == 2 && g_aa == 1 && g_nit == 1 && g_s2x == 0 && g_color == 1) return 0;
+  if (g_suav == 1 && g_aa == 1 && g_nit == 0 && g_s2x == 0 && g_color == 1) return 1;
+  if (g_suav == 0 && g_aa == 0 && g_nit == 0 && g_s2x == 0 && g_color == 0) return 2;
+  return -1;
+}
+
+static void calidad_cambiar(int d) {
+  int q = calidad_actual();
+  if (q < 0) q = (d > 0) ? 2 : 0;
+  q = (q + d + 3) % 3;
+  if (q == 0) { g_suav = 2; g_aa = 1; g_nit = 1; g_s2x = 0; g_color = 1; }
+  else if (q == 1) { g_suav = 1; g_aa = 1; g_nit = 0; g_s2x = 0; g_color = 1; }
+  else { g_suav = 0; g_aa = 0; g_nit = 0; g_s2x = 0; g_color = 0; }
+  guardar_num("/data/swan/suav.txt", g_suav);
+  guardar_num("/data/swan/aa.txt", g_aa);
+  guardar_num("/data/swan/nit.txt", g_nit);
+  guardar_num("/data/swan/s2x.txt", g_s2x);
+  guardar_num("/data/swan/color.txt", g_color);
+  esp("MENU: calidad = %d", q);
+  snprintf(g_msg, sizeof(g_msg), "Calidad cambiada (no aplica con escala Original)");
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -2319,10 +2438,20 @@ static void menu_refrescar(void) {
   if (g_nmarcos <= 0) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: no hay marco.png");
   else if (!g_marco_on) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: Ninguno  (izq/der)");
   else snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: %d de %d  (izq/der)", g_marco_idx + 1, g_nmarcos);
-  snprintf(g_ml[12], sizeof(g_ml[12]), "Continuar");
-  snprintf(g_ml[13], sizeof(g_ml[13]), "Volver al menu de juegos");
-  snprintf(g_ml[14], sizeof(g_ml[14]), "Salir de la app");
-  g_menu_n = 15;
+  const char *co[5] = {"Original", "Natural", "Vivido", "Calido", "Retro"};
+  snprintf(g_ml[12], sizeof(g_ml[12]), "Color: %s  (izq/der)", co[g_color % 5]);
+  snprintf(g_ml[13], sizeof(g_ml[13]), "Mostrar FPS: %s", g_fps_on ? "Si" : "No");
+  {
+    int q = calidad_actual();
+    if (q == 0) snprintf(g_ml[14], sizeof(g_ml[14]), "Calidad: Mejor  (izq/der)");
+    else if (q == 1) snprintf(g_ml[14], sizeof(g_ml[14]), "Calidad: Equilibrada  (izq/der)");
+    else if (q == 2) snprintf(g_ml[14], sizeof(g_ml[14]), "Calidad: Rapida  (izq/der)");
+    else snprintf(g_ml[14], sizeof(g_ml[14]), "Calidad: Personalizada  (izq/der)");
+  }
+  snprintf(g_ml[15], sizeof(g_ml[15]), "Continuar");
+  snprintf(g_ml[16], sizeof(g_ml[16]), "Volver al menu de juegos");
+  snprintf(g_ml[17], sizeof(g_ml[17]), "Salir de la app");
+  g_menu_n = 18;
 }
 
 static void menu_pedir_dibujo(void) {
@@ -2368,6 +2497,9 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 9) jit_conmutar();
       else if (g_menu_sel == 10) crt_cambiar(dx);
       else if (g_menu_sel == 11) marco_ciclar(dx);
+      else if (g_menu_sel == 12) color_cambiar(dx);
+      else if (g_menu_sel == 13) fps_cambiar();
+      else if (g_menu_sel == 14) calidad_cambiar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 0)) {
@@ -2383,12 +2515,15 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 9) jit_conmutar();
       else if (g_menu_sel == 10) crt_cambiar(1);
       else if (g_menu_sel == 11) marco_ciclar(1);
-      else if (g_menu_sel == 12) salir = 1;
-      else if (g_menu_sel == 13) {
+      else if (g_menu_sel == 12) color_cambiar(1);
+      else if (g_menu_sel == 13) fps_cambiar();
+      else if (g_menu_sel == 14) calidad_cambiar(1);
+      else if (g_menu_sel == 15) salir = 1;
+      else if (g_menu_sel == 16) {
         if (conf) { g_volver = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para volver al menu (se cierra el juego)"); }
       }
-      else if (g_menu_sel == 14) {
+      else if (g_menu_sel == 17) {
         if (conf) { g_salir = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para cerrar la app"); }
       }
@@ -2666,6 +2801,21 @@ inicio_menu:;
         if (c >= '0' && c <= '2') g_crt = c - '0';
       }
       esp("CRT inicial=%d", g_crt);
+    }
+    {
+      FILE *fk = fopen("/data/swan/color.txt", "rb");
+      if (fk) {
+        int c = fgetc(fk);
+        fclose(fk);
+        if (c >= '0' && c <= '4') g_color = c - '0';
+      }
+      FILE *fq = fopen("/data/swan/fps.txt", "rb");
+      if (fq) {
+        int c = fgetc(fq);
+        fclose(fq);
+        if (c == '0' || c == '1') g_fps_on = c - '0';
+      }
+      esp("COLOR inicial=%d fps=%d", g_color, g_fps_on);
     }
     FILE *fa = fopen("/data/swan/aa.txt", "rb");
     if (fa) {
