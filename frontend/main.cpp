@@ -238,6 +238,7 @@ static int g_xmap_w = 0, g_xmap_W = 0;
 /* menu de opciones dentro del juego (L3) */
 static volatile int g_menu_toggle = 0;
 static volatile int g_menu_vis = 0;
+static SDL_Texture *g_fondo_opc = NULL; /* /data/swan/fondo_opciones.png: diseno del menu de opciones dentro del juego */
 static int g_menu_sel = 0, g_menu_n = 0;
 static char g_ml[20][72];
 static char g_msg[80] = "";
@@ -1426,7 +1427,38 @@ static void dibujar_juego(void) {
     SDL_Rect dst = {(1920 - g_tw) / 2, (1080 - g_th) / 2, g_tw, g_th};
     SDL_RenderCopy(R, g_tex, NULL, &dst);
   }
-  if (g_menu_vis) {
+  if (g_menu_vis && g_fondo_opc) {
+    /* menu de opciones con el diseno de /data/swan/fondo_opciones.png (el panel de la imagen es transparente) */
+    SDL_RenderSetScale(R, 1, 1);
+    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(R, 0, 0, 24, 255);
+    SDL_RenderClear(R);
+    SDL_SetRenderDrawColor(R, 10, 18, 64, 255);
+    SDL_Rect pf = {70, 140, 1140, 805};
+    SDL_RenderFillRect(R, &pf);
+    SDL_RenderCopy(R, g_fondo_opc, NULL, NULL);
+    int mn = g_menu_n;
+    int vis = (mn < 15) ? mn : 15;
+    int top = g_menu_sel - 7;
+    if (top > mn - vis) top = mn - vis;
+    if (top < 0) top = 0;
+    for (int k = 0; k < vis; k++) {
+      int mi = top + k;
+      int y = 168 + k * 46;
+      if (mi == g_menu_sel) {
+        SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
+        SDL_Rect bar = {100, y, 1080, 44};
+        SDL_RenderFillRect(R, &bar);
+        texto_col(130, (float)(y + 10), 3, 20, 20, 40, g_ml[mi]);
+      } else {
+        texto_col(130, (float)(y + 10), 3, 255, 255, 255, g_ml[mi]);
+      }
+    }
+    texto_col(110, 880, 2, 255, 255, 255, g_msg);
+    char cn[16];
+    snprintf(cn, sizeof(cn), "%d/%d", g_menu_sel + 1, mn);
+    texto_col(1060, 880, 2, 175, 180, 220, cn);
+  } else if (g_menu_vis) {
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(R, 0, 0, 40, 220);
     SDL_Rect pn = {420, 180, 1080, 860};
@@ -2163,6 +2195,19 @@ static void cargar_fondo_menu(void) {
 static void cargar_fondo_menu(void) { g_fondo_probado = 1; }
 #endif
 
+/* Diseno del menu de opciones dentro del juego. Sin el archivo se usa el panel simple de siempre. */
+#ifdef HAY_STBI
+static int g_opc_probado = 0;
+static void cargar_fondo_opc(void) {
+  if (g_opc_probado) return;
+  g_opc_probado = 1;
+  g_fondo_opc = png_a_textura("/data/swan/fondo_opciones.png");
+  esp("MENU: fondo de opciones %s", g_fondo_opc ? "cargado" : "no hay /data/swan/fondo_opciones.png (panel simple)");
+}
+#else
+static void cargar_fondo_opc(void) {}
+#endif
+
 /* posiciones medidas sobre el fondo (1920x1080) */
 #define PS_LX 292     /* barra de seleccion: x */
 #define PS_LW 856     /* ancho */
@@ -2244,6 +2289,7 @@ static void dibujar_menu(int sel, int top) {
 }
 
 static int elegir_juego(char *out, size_t outn) {
+  cargar_fondo_opc();
   int n = listar_juegos();
   if (n <= 0) return 0;
 
