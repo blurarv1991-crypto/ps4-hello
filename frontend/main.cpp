@@ -168,6 +168,7 @@ void retro_set_audio_sample_batch(size_t (*cb)(const int16_t *, size_t));
 void retro_set_input_poll(void (*cb)(void));
 void retro_set_input_state(int16_t (*cb)(unsigned, unsigned, unsigned, unsigned));
 void retro_init(void);
+void retro_set_controller_port_device(unsigned port, unsigned device);
 bool retro_load_game(const struct retro_game_info *game);
 void retro_run(void);
 void retro_unload_game(void);
@@ -632,23 +633,29 @@ static int hilo_audio(void *arg) {
 
 /* Segundo mando: otro usuario con sesion iniciada, o el indice 1 del mismo usuario */
 static void abrir_pad2(void) {
+  static int intentos = 0;
+  int log = (intentos < 4); /* solo los primeros intentos van al log, para no llenarlo */
+  intentos++;
   int lista[4] = {-1, -1, -1, -1};
   int r = mia_u_lista(lista);
   int h = -1;
+  if (log) esp("PAD2 intento %d: usuarios con sesion=%d,%d,%d,%d (ret=0x%x) usuario del mando 1=%d handle del mando 1=%d", intentos,
+               lista[0], lista[1], lista[2], lista[3], (unsigned)r, g_uid1, g_pad);
   if (r == 0) {
     for (int k = 0; k < 4 && h < 0; k++) {
       if (lista[k] > 0 && lista[k] != g_uid1) {
         int t = scePadOpen(lista[k], 0, 0, NULL);
+        if (log) esp("PAD2   abrir usuario %d -> 0x%x", lista[k], (unsigned)t);
         if (t >= 0 && t != g_pad) h = t;
       }
     }
   }
   if (h < 0) {
     int t = scePadOpen(g_uid1, 0, 1, NULL);
+    if (log) esp("PAD2   abrir mismo usuario indice 1 -> 0x%x", (unsigned)t);
     if (t >= 0 && t != g_pad) h = t;
   }
-  static int ult = -2;
-  if (h != ult) { esp("PAD2 lista=%d handle=%d", r, h); ult = h; }
+  if (h >= 0 && g_pad2 < 0) esp("PAD2 mando 2 abierto, handle=%d", h);
   if (h >= 0) g_pad2 = h;
 }
 
@@ -687,6 +694,8 @@ static void poll2(void) {
   memset(&d, 0, sizeof(d));
   if (scePadReadState(g_pad2, &d) != 0) { g_mask2 = 0; return; }
   g_mask2 = mascara_pad(d);
+  static int visto = 0;
+  if (g_mask2 && !visto) { visto = 1; esp("PAD2 primer boton recibido: 0x%x", g_mask2); }
 }
 
 /* Lee el mando y arma la mascara de botones de libretro */
@@ -3293,6 +3302,8 @@ inicio_menu:;
   struct retro_game_info gi;
   memset(&gi, 0, sizeof(gi));
   gi.path = ruta;
+  retro_set_controller_port_device(1, 1); /* jugador 2: mando digital (RETRO_DEVICE_JOYPAD) */
+  esp("PAD2 puerto 2 pedido como mando digital");
   esp("INICIO retro_load_game");
   g_traza = 1;
   bool ok = retro_load_game(&gi);
