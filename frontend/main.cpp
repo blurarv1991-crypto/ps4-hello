@@ -46,6 +46,7 @@ int mia_k_open(const char *ruta, int flags, int modo) __asm__("sceKernelOpen");
 int mia_k_getdents(int fd, char *buf, int n) __asm__("sceKernelGetdents");
 int mia_k_mprotect(const void *addr, size_t len, int prot) __asm__("sceKernelMprotect");
 int mia_k_close(int fd) __asm__("sceKernelClose");
+int mia_u_lista(int *lista) __asm__("sceUserServiceGetLoginUserIdList");
 }
 
 typedef OrbisPadData ScePadData;
@@ -139,6 +140,15 @@ struct retro_game_info {
   size_t size;
   const char *meta;
 };
+struct retro_disk_control_callback {
+  bool (*set_eject_state)(bool ejected);
+  bool (*get_eject_state)(void);
+  unsigned (*get_image_index)(void);
+  bool (*set_image_index)(unsigned index);
+  unsigned (*get_num_images)(void);
+  bool (*replace_image_index)(unsigned index, const struct retro_game_info *info);
+  bool (*add_image_index)(void);
+};
 struct retro_system_av_info {
   unsigned base_width;
   unsigned base_height;
@@ -206,6 +216,11 @@ static int g_dib_hilo = 0;
 
 /* mando */
 static int g_pad = -1;
+static int g_pad2 = -1;       /* segundo mando (jugador 2) */
+static int g_uid1 = 0;        /* usuario del primer mando */
+static unsigned g_mask2 = 0;  /* botones del jugador 2 en formato libretro */
+struct retro_disk_control_callback g_dc;  /* control de discos del nucleo (juegos de varios CD) */
+static int g_dc_ok = 0;
 static unsigned g_mask = 0;
 static uint32_t g_btn = 0;
 static uint32_t g_btn_prev = 0;
@@ -449,11 +464,20 @@ static bool entorno(unsigned cmd, void *data) {
       esp("ENV10 formato pixel pedido=%d", g_pf);
       return true;
     case 11: return true;
+    case 13:
+      memcpy(&g_dc, data, sizeof(g_dc));
+      g_dc_ok = 1;
+      esp("ENV13 control de discos recibido");
+      return true;
     case 15: {
       retro_variable *v = (retro_variable *)data;
       if (!g_traza) esp("ENV15 clave=%s", v->key ? v->key : "(null)");
       if (contiene(v->key, "fastmem")) {
         v->value = "Disabled";
+        return true;
+      }
+      if (contiene(v->key, "Controller2") && contiene(v->key, "Type")) {
+        v->value = "DigitalController"; /* jugador 2 con mando digital */
         return true;
       }
       if (contiene(v->key, "GPU_Renderer")) {
@@ -606,8 +630,67 @@ static int hilo_audio(void *arg) {
   return 0;
 }
 
+/* Segundo mando: otro usuario con sesion iniciada, o el indice 1 del mismo usuario */
+static void abrir_pad2(void) {
+  int lista[4] = {-1, -1, -1, -1};
+  int r = mia_u_lista(lista);
+  int h = -1;
+  if (r == 0) {
+    for (int k = 0; k < 4 && h < 0; k++) {
+      if (lista[k] > 0 && lista[k] != g_uid1) {
+        int t = scePadOpen(lista[k], 0, 0, NULL);
+        if (t >= 0 && t != g_pad) h = t;
+      }
+    }
+  }
+  if (h < 0) {
+    int t = scePadOpen(g_uid1, 0, 1, NULL);
+    if (t >= 0 && t != g_pad) h = t;
+  }
+  static int ult = -2;
+  if (h != ult) { esp("PAD2 lista=%d handle=%d", r, h); ult = h; }
+  if (h >= 0) g_pad2 = h;
+}
+
+static unsigned mascara_pad(const ScePadData &d) {
+  uint32_t b = d.buttons;
+  unsigned m = 0;
+  if (b & PB_CROSS) m |= 1u << 0;
+  if (b & PB_SQUARE) m |= 1u << 1;
+  if (b & PB_TOUCH) m |= 1u << 2;
+  if (b & PB_OPTIONS) m |= 1u << 3;
+  if (b & PB_UP) m |= 1u << 4;
+  if (b & PB_DOWN) m |= 1u << 5;
+  if (b & PB_LEFT) m |= 1u << 6;
+  if (b & PB_RIGHT) m |= 1u << 7;
+  if (b & PB_CIRCLE) m |= 1u << 8;
+  if (b & PB_TRIANGLE) m |= 1u << 9;
+  if (b & PB_L1) m |= 1u << 10;
+  if (b & PB_R1) m |= 1u << 11;
+  if (b & PB_L2) m |= 1u << 12;
+  if (b & PB_R2) m |= 1u << 13;
+  if (d.leftStick.x < 64) m |= 1u << 6;
+  if (d.leftStick.x > 192) m |= 1u << 7;
+  if (d.leftStick.y < 64) m |= 1u << 4;
+  if (d.leftStick.y > 192) m |= 1u << 5;
+  return m;
+}
+
+static void poll2(void) {
+  static int cuenta = 0;
+  if (g_pad2 < 0) {
+    g_mask2 = 0;
+    if (++cuenta >= 180) { cuenta = 0; abrir_pad2(); }
+    return;
+  }
+  ScePadData d;
+  memset(&d, 0, sizeof(d));
+  if (scePadReadState(g_pad2, &d) != 0) { g_mask2 = 0; return; }
+  g_mask2 = mascara_pad(d);
+}
+
 /* Lee el mando y arma la mascara de botones de libretro */
-static void poll(void) {
+static void poll1(void) {
   if (g_pad < 0) return;
   ScePadData d;
   memset(&d, 0, sizeof(d));
@@ -646,11 +729,17 @@ static void poll(void) {
   g_btn_prev = b;
 }
 
+static void poll(void) {
+  poll1();
+  poll2();
+}
+
 static int16_t entrada(unsigned port, unsigned dev, unsigned idx, unsigned id) {
   (void)idx;
-  if (port != 0 || dev != 1) return 0;
-  if (id == 256) return (int16_t)(g_mask & 0xFFFF);
-  if (id < 16) return (int16_t)((g_mask >> id) & 1u);
+  if (dev != 1 || port > 1) return 0;
+  unsigned mk = (port == 0) ? g_mask : g_mask2;
+  if (id == 256) return (int16_t)(mk & 0xFFFF);
+  if (id < 16) return (int16_t)((mk >> id) & 1u);
   return 0;
 }
 
@@ -1703,7 +1792,7 @@ static const char *extension(const char *n) {
 
 static int ext_juego(const char *n) {
   const char *e = extension(n);
-  return !cmp_ci(e, "cue") || !cmp_ci(e, "chd") || !cmp_ci(e, "pbp") || !cmp_ci(e, "iso") || !cmp_ci(e, "bin");
+  return !cmp_ci(e, "cue") || !cmp_ci(e, "chd") || !cmp_ci(e, "pbp") || !cmp_ci(e, "iso") || !cmp_ci(e, "bin") || !cmp_ci(e, "m3u");
 }
 
 /* a y b con extension de 3 letras: mismo nombre sin la extension */
@@ -2681,6 +2770,22 @@ static void calidad_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Calidad cambiada (no aplica con escala Original)");
 }
 
+static int disco_total(void) {
+  return (g_dc_ok && g_dc.get_num_images) ? (int)g_dc.get_num_images() : 0;
+}
+
+static void disco_cambiar(int d) {
+  int n = disco_total();
+  if (n < 2 || !g_dc.get_image_index || !g_dc.set_image_index || !g_dc.set_eject_state) return;
+  int cur = (int)g_dc.get_image_index();
+  int nx = (((cur + d) % n) + n) % n;
+  g_dc.set_eject_state(true);
+  g_dc.set_image_index((unsigned)nx);
+  g_dc.set_eject_state(false);
+  esp("DISCO: %d -> %d de %d", cur + 1, nx + 1, n);
+  snprintf(g_msg, sizeof(g_msg), "Disco %d de %d insertado", nx + 1, n);
+}
+
 static void menu_refrescar(void) {
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
@@ -2714,6 +2819,10 @@ static void menu_refrescar(void) {
   snprintf(g_ml[16], sizeof(g_ml[16]), "Volver al menu de juegos  (triangulo)");
   snprintf(g_ml[17], sizeof(g_ml[17]), "Salir de la app");
   g_menu_n = 18;
+  if (disco_total() > 1) {
+    snprintf(g_ml[18], sizeof(g_ml[18]), "Disco: %d de %d  (izq/der)", (int)g_dc.get_image_index() + 1, disco_total());
+    g_menu_n = 19;
+  }
 }
 
 static void menu_pedir_dibujo(void) {
@@ -2764,6 +2873,7 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 12) color_cambiar(dx);
       else if (g_menu_sel == 13) fps_cambiar();
       else if (g_menu_sel == 14) calidad_cambiar(dx);
+      else if (g_menu_sel == 18) disco_cambiar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 9)) {
@@ -2788,6 +2898,7 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 13) fps_cambiar();
       else if (g_menu_sel == 14) calidad_cambiar(1);
       else if (g_menu_sel == 15) salir = 1;
+      else if (g_menu_sel == 18) disco_cambiar(1);
       else if (g_menu_sel == 16) {
         if (conf) { g_volver = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para volver al menu (se cierra el juego)"); }
@@ -2939,6 +3050,8 @@ int main(void) {
   int rg = sceUserServiceGetInitialUser(&uid);
   int rp = scePadInit();
   g_pad = scePadOpen(uid, 0, 0, NULL);
+  g_uid1 = (int)uid;
+  abrir_pad2();
   esp("PAD userinit=%d getuser=%d uid=%d padinit=%d handle=%d", ru, rg, (int)uid, rp, g_pad);
 
   /* Audio: puerto principal, 256 muestras por bloque, 48000 Hz, S16 estereo.
