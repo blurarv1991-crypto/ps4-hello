@@ -242,6 +242,7 @@ static int g_xmap_w = 0, g_xmap_W = 0;
 /* menu de opciones dentro del juego (L3) */
 static volatile int g_menu_toggle = 0;
 static volatile int g_menu_vis = 0;
+static SDL_Texture *g_fondo_pop = NULL; /* /data/swan/fondo_popup.png: marco del popup de opciones en el menu de juegos */
 static SDL_Texture *g_fondo_opc = NULL; /* /data/swan/fondo_opciones.png: diseno del menu de opciones dentro del juego */
 static int g_menu_sel = 0, g_menu_n = 0;
 static char g_ml[20][72];
@@ -2082,6 +2083,37 @@ static void pop_ajustar(int idx, int dx) {
 static void dibujar_popup_opciones(void) {
   if (!g_pop_vis) return;
   menu_refrescar();
+  if (g_fondo_pop) {
+    /* diseno de /data/swan/fondo_popup.png (1287x1006, panel interior transparente en x37..1253, y118..970) */
+    const float sc = 1100.0f / 1287.0f;
+    const int dw = 1100, dh = (int)(1006 * sc), dx = (1920 - dw) / 2, dy = (1080 - dh) / 2;
+    const int ix0 = dx + (int)(37 * sc), iy0 = dy + (int)(118 * sc);
+    const int ix1 = dx + (int)(1253 * sc), iy1 = dy + (int)(970 * sc);
+    SDL_RenderSetScale(R, 1, 1);
+    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(R, 10, 18, 64, 255);
+    SDL_Rect pf = {ix0 - 3, iy0 - 3, ix1 - ix0 + 6, iy1 - iy0 + 6};
+    SDL_RenderFillRect(R, &pf);
+    SDL_Rect dr = {dx, dy, dw, dh};
+    SDL_RenderCopy(R, g_fondo_pop, NULL, &dr);
+    texto_col((float)(ix0 + 24), (float)(iy0 + 14), 2, 175, 180, 220, "TRIANGULO O O: CERRAR   X: CAMBIAR   IZQ/DER: AJUSTAR");
+    int sp = (iy1 - iy0 - 116) / POP_N;
+    if (sp > 50) sp = 50;
+    for (int k = 0; k < POP_N; k++) {
+      int y = iy0 + 52 + k * sp;
+      const char *t = g_ml[POP_IDX[k]];
+      if (k == g_pop_sel) {
+        SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
+        SDL_Rect bar = {ix0 + 6, y, ix1 - ix0 - 12, sp - 4};
+        SDL_RenderFillRect(R, &bar);
+        texto_col((float)(ix0 + 24), (float)(y + (sp - 4 - 24) / 2), 3, 20, 20, 40, t);
+      } else {
+        texto_col((float)(ix0 + 24), (float)(y + (sp - 4 - 24) / 2), 3, 255, 255, 255, t);
+      }
+    }
+    texto_col((float)(ix0 + 24), (float)(iy1 - 34), 2, 255, 255, 255, g_msg);
+    return;
+  }
   const int PW = 900, PH = 860, PX = (1920 - PW) / 2, PY = 100;
   panel(PX, PY, PW, PH, 14, 10, 14, 60, 235);
   texto_col(PX + 40, PY + 24, 4, 240, 190, 0, "OPCIONES");
@@ -2251,6 +2283,8 @@ static void cargar_fondo_opc(void) {
   g_opc_probado = 1;
   g_fondo_opc = png_a_textura("/data/swan/fondo_opciones.png");
   esp("MENU: fondo de opciones %s", g_fondo_opc ? "cargado" : "no hay /data/swan/fondo_opciones.png (panel simple)");
+  g_fondo_pop = png_a_textura("/data/swan/fondo_popup.png");
+  esp("MENU: marco del popup %s", g_fondo_pop ? "cargado" : "no hay /data/swan/fondo_popup.png (panel simple)");
 }
 #else
 static void cargar_fondo_opc(void) {}
