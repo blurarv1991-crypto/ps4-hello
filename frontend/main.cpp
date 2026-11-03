@@ -260,7 +260,7 @@ static volatile int g_menu_vis = 0;
 static SDL_Texture *g_fondo_pop = NULL; /* /data/swan/fondo_popup.png: marco del popup de opciones en el menu de juegos */
 static SDL_Texture *g_fondo_opc = NULL; /* /data/swan/fondo_opciones.png: diseno del menu de opciones dentro del juego */
 static int g_menu_sel = 0, g_menu_n = 0;
-static char g_ml[20][72];
+static char g_ml[24][72];
 static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
@@ -869,6 +869,11 @@ static void dibujar(void) {
          en vertical el factor ya es entero, asi que no hace falta mezclar.
    Alto: bordes mas suaves (mezcla el doble de ancha) en horizontal y vertical. */
 static int g_suav = 0;
+static int g_recorte = 1; /* recorte automatico de filas negras + imagen a alto completo (escala Maxima) */
+static int g_nitido = 1;  /* escalado nitido: interpolacion sin pixeles borrosos en horizontal y vertical */
+static int g_cr_t = -1, g_cr_b = -1;               /* filas negras detectadas arriba y abajo */
+static int g_cr_w = 0, g_cr_h = 0, g_cr_cnt = 0;
+static int g_cr_win = 0, g_cr_wt = 9999, g_cr_wb = 9999;
 static uint16_t g_hrow[2][1920]; /* dos filas ya estiradas (sin buffer grande) */
 static int g_hrow_y[2];
 static int g_hi0[1920], g_hi1[1920];
@@ -1138,6 +1143,45 @@ static void crt_lineas(int W, int H) {
   }
 }
 
+/* Una fila es negra si todos los pixeles muestreados tienen muy poco brillo */
+static int fila_negra(const uint16_t *p, int w) {
+  for (int x = 0; x < w; x += 3) {
+    if (luma16(p[x]) > 14) return 0;
+  }
+  return 1;
+}
+
+/* Detecta las filas negras de arriba y abajo del cuadro del juego (maximo 12% por lado).
+   Solo se achica el recorte si aparece imagen en esas filas; crece si durante ~40 revisiones seguidas siguen negras. */
+static void recorte_actualizar(int w, int h) {
+  if (w != g_cr_w || h != g_cr_h) {
+    g_cr_w = w; g_cr_h = h; g_cr_t = -1; g_cr_b = -1;
+    g_cr_cnt = 0; g_cr_win = 0; g_cr_wt = 9999; g_cr_wb = 9999;
+  }
+  if (g_cr_t >= 0 && (g_cr_cnt++ % 6) != 0) return;
+  int maxc = h * 12 / 100;
+  if (maxc < 1 || w < 16) return;
+  if (fila_negra(g_snap + (size_t)(h / 2) * (size_t)w, w)) return; /* pantalla negra o fundido */
+  int t = 0, b = 0;
+  while (t < maxc && fila_negra(g_snap + (size_t)t * (size_t)w, w)) t++;
+  while (b < maxc && fila_negra(g_snap + (size_t)(h - 1 - b) * (size_t)w, w)) b++;
+  int t0 = g_cr_t, b0 = g_cr_b;
+  if (g_cr_t < 0) {
+    g_cr_t = t; g_cr_b = b;
+  } else {
+    if (t < g_cr_t) g_cr_t = t;
+    if (b < g_cr_b) g_cr_b = b;
+    if (t < g_cr_wt) g_cr_wt = t;
+    if (b < g_cr_wb) g_cr_wb = b;
+    if (++g_cr_win >= 40) {
+      if (g_cr_wt > g_cr_t) g_cr_t = g_cr_wt;
+      if (g_cr_wb > g_cr_b) g_cr_b = g_cr_wb;
+      g_cr_win = 0; g_cr_wt = 9999; g_cr_wb = 9999;
+    }
+  }
+  if (g_cr_t != t0 || g_cr_b != b0) esp("RECORTE: %dx%d filas negras arriba=%d abajo=%d", w, h, g_cr_t, g_cr_b);
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
@@ -1174,29 +1218,54 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     k = 1;
     g_kreal = 1;
   }
+  /* recorte automatico: quita las filas negras del juego y llena el alto de la pantalla (escala Maxima) */
+  int fill = 0, cr_t = 0, cn = h;
+  if (g_recorte && (g_modo == 3 || g_forzar_W > 0)) {
+    recorte_actualizar(w, h);
+    int ct = g_cr_t > 0 ? g_cr_t : 0;
+    int cb = g_cr_b > 0 ? g_cr_b : 0;
+    if (h - ct - cb >= h / 2) {
+      cr_t = ct;
+      cn = h - ct - cb;
+    }
+    if (g_forzar_W <= 0) {
+      fill = 1;
+      long long Wf = g_asp ? (1440LL * h) / cn : ((long long)w * 1080) / cn;
+      W = Wf > 1920 ? 1920 : (int)Wf;
+      H = 1080;
+      k = 1;
+      g_kreal = 1;
+    }
+  }
   int sw = w, sh = h;
   const uint16_t *src = pre_aplicar(w, h, W, H, &sw, &sh);
   int sv = g_suav;
-  if ((sv || sw != w || g_forzar_W > 0) && sh <= 1152 && W <= 1920 && H <= 1080) {
+  if ((sv || sw != w || g_forzar_W > 0 || fill || g_nitido) && sh <= 1152 && W <= 1920 && H <= 1080) {
     uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
-    if (g_h_w != sw || g_h_W != W || g_h_s != sv) {
-      suav_tabla(sw, W, sv == 2 ? 2 : (sv ? 1 : 0), g_hi0, g_hi1, g_hw);
+    int hm = (sv == 2) ? 2 : ((sv || g_nitido || fill) ? 1 : 0);
+    int vm = (sv == 2) ? 2 : ((g_nitido || fill) ? 1 : 0);
+    int esc = (h > 0) ? sh / h : 1;
+    if (esc < 1) esc = 1;
+    int cr0 = cr_t * esc, nch = cn * esc;
+    if (cr0 + nch > sh) { cr0 = 0; nch = sh; }
+    if (g_h_w != sw || g_h_W != W || g_h_s != hm) {
+      suav_tabla(sw, W, hm, g_hi0, g_hi1, g_hw);
       g_h_w = sw;
       g_h_W = W;
-      g_h_s = sv;
+      g_h_s = hm;
     }
-    if (g_v_h != sh || g_v_H != H || g_v_s != sv) {
-      suav_tabla(sh, H, sv == 2 ? 2 : 0, g_vi0, g_vi1, g_svw);
-      g_v_h = sh;
+    if (g_v_h != nch || g_v_H != H || g_v_s != vm) {
+      suav_tabla(nch, H, vm, g_vi0, g_vi1, g_svw);
+      g_v_h = nch;
       g_v_H = H;
-      g_v_s = sv;
+      g_v_s = vm;
     }
     g_hrow_y[0] = -1;
     g_hrow_y[1] = -1;
     for (int oy = 0; oy < H; oy++) {
       uint16_t *d = g_sbuf + (size_t)oy * W;
       const uint16_t *r[2];
-      int ys[2] = {g_vi0[oy], g_vi1[oy]};
+      int ys[2] = {g_vi0[oy] + cr0, g_vi1[oy] + cr0};
       for (int q = 0; q < 2; q++) {
         int y = ys[q];
         uint16_t *hr = g_hrow[y & 1];
@@ -1430,6 +1499,24 @@ static void marco_ciclar(int d) {
   marco_unlock();
 }
 
+/* Deja puesto un marco concreto (0..n-1) o ninguno (n). Lo usan los ajustes por juego */
+static void marco_fijar(int estado) {
+  int n = g_nmarcos;
+  if (n <= 0) return;
+  if (estado < 0 || estado > n) estado = n;
+  int act = g_marco_on ? g_marco_idx : n;
+  if (act == estado) return;
+  marco_lock();
+  if (estado >= n) {
+    marco_liberar();
+  } else if (marco_cargar_idx(estado)) {
+    g_marco_on = 1;
+  }
+  FILE *fs = fopen("/data/swan/marco_sel.txt", "wb");
+  if (fs) { fputc('0' + estado, fs); fclose(fs); }
+  marco_unlock();
+}
+
 static void cargar_marco(void) {
   if (g_marco_cargado) return;
   g_marco_cargado = 1;
@@ -1466,6 +1553,7 @@ static void cargar_marco(void) {
 #else
 static void cargar_marco(void) {}
 static void marco_ciclar(int d) { (void)d; }
+static void marco_fijar(int estado) { (void)estado; }
 #endif
 
 /* Pantalla de juego: modo 0 original, 1 = 2x, 2 = 3x, 3 = maximo */
@@ -1611,7 +1699,7 @@ static void dibujar_juego_interno(void) {
     SDL_RenderSetScale(R, 3, 3);
     float ox = ox0 / 3.0f, oy = oy0 / 3.0f;
     texto(ox, oy, "OPCIONES  (L3 o O: cerrar)");
-    for (int mi = 0; mi < mn && mi < 20; mi++) {
+    for (int mi = 0; mi < mn && mi < 24; mi++) {
       char ml[90];
       snprintf(ml, sizeof(ml), "%s%s", mi == g_menu_sel ? "> " : "  ", g_ml[mi]);
       texto(ox, oy + 22 + mi * LH, ml);
@@ -2141,13 +2229,17 @@ static void crt_cambiar(int d);
 static void color_cambiar(int d);
 static void fps_cambiar(void);
 static void calidad_cambiar(int d);
+static void recorte_cambiar(int d);
+static void nitido_cambiar(int d);
+static void ajustes_guardar_nombre(const char *nombre);
+static void ajustes_cargar_nombre(const char *nombre);
 static void menu_refrescar(void);
 
 /* ---- Opciones antes de entrar al juego (triangulo en el menu de juegos) ---- */
 static int g_pop_vis = 0, g_pop_sel = 0;
-#define POP_N 13
+#define POP_N 15
 /* lineas de menu_refrescar() que valen sin juego cargado (Escala ... Calidad, Continuar) */
-static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17};
 
 static void pop_ajustar(int idx, int dx) {
   g_msg[0] = 0;
@@ -2164,6 +2256,8 @@ static void pop_ajustar(int idx, int dx) {
     case 12: color_cambiar(dx); break;
     case 13: fps_cambiar(); break;
     case 14: calidad_cambiar(dx); break;
+    case 15: recorte_cambiar(dx); break;
+    case 16: nitido_cambiar(dx); break;
     default: break;
   }
   menu_refrescar();
@@ -2208,15 +2302,15 @@ static void dibujar_popup_opciones(void) {
   texto_col(PX + 40, PY + 24, 4, 240, 190, 0, "OPCIONES");
   texto_col(PX + 40, PY + 74, 2, 175, 180, 220, "TRIANGULO O O: CERRAR   X: CAMBIAR   IZQ/DER: AJUSTAR");
   for (int k = 0; k < POP_N; k++) {
-    int y = PY + 120 + k * 50;
+    int y = PY + 108 + k * 46;
     const char *t = g_ml[POP_IDX[k]];
     if (k == g_pop_sel) {
       SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
-      SDL_Rect bar = {PX + 24, y, PW - 48, 46};
+      SDL_Rect bar = {PX + 24, y, PW - 48, 42};
       SDL_RenderFillRect(R, &bar);
-      texto_col(PX + 44, y + 10, 3, 20, 20, 40, t);
+      texto_col(PX + 44, y + 9, 3, 20, 20, 40, t);
     } else {
-      texto_col(PX + 44, y + 10, 3, 255, 255, 255, t);
+      texto_col(PX + 44, y + 9, 3, 255, 255, 255, t);
     }
   }
   texto_col(PX + 40, PY + PH - 40, 2, 255, 255, 255, g_msg);
@@ -2555,16 +2649,17 @@ static int elegir_juego(char *out, size_t outn) {
         int idx = POP_IDX[g_pop_sel];
         if (dx != 0) pop_ajustar(idx, dx);
         if (nuevos & PB_CROSS) {
-          if (idx == 15) g_pop_vis = 0;
+          if (idx == 17) { g_pop_vis = 0; ajustes_guardar_nombre(g_jn[sel]); }
           else pop_ajustar(idx, 1);
         }
-        if (nuevos & (PB_TRIANGLE | PB_CIRCLE | PB_L3)) g_pop_vis = 0;
+        if (nuevos & (PB_TRIANGLE | PB_CIRCLE | PB_L3)) { g_pop_vis = 0; ajustes_guardar_nombre(g_jn[sel]); }
         dibujar_menu(sel, top);
         SDL_Delay(16);
         continue;
       }
       if (nuevos & PB_TRIANGLE) {
         cargar_marco(); /* para que "Marco" funcione tambien antes de entrar al juego */
+        ajustes_cargar_nombre(g_jn[sel]); /* ajustes guardados de este juego, si los hay */
         g_pop_vis = 1;
         g_pop_sel = 0;
         g_msg[0] = 0;
@@ -2746,6 +2841,87 @@ static void fps_cambiar(void) {
   esp("MENU: fps = %d", g_fps_on);
 }
 
+static void recorte_cambiar(int d) {
+  (void)d;
+  g_recorte = !g_recorte;
+  guardar_num("/data/swan/recorte.txt", g_recorte);
+  esp("MENU: recorte automatico = %d", g_recorte);
+  snprintf(g_msg, sizeof(g_msg), "Recorte automatico cambiado (solo escala Maxima)");
+}
+
+static void nitido_cambiar(int d) {
+  (void)d;
+  g_nitido = !g_nitido;
+  guardar_num("/data/swan/nitido.txt", g_nitido);
+  esp("MENU: escalado nitido = %d", g_nitido);
+  snprintf(g_msg, sizeof(g_msg), "Escalado nitido cambiado (no aplica con escala Original)");
+}
+
+/* ---- Ajustes de imagen por juego: /data/swan/ajuste_<juego>.txt ---- */
+static void id_de_nombre(const char *nombre, char *out, size_t n) {
+  const char *b = nombre;
+  for (const char *q = nombre; *q; q++) {
+    if (*q == '/') b = q + 1;
+  }
+  snprintf(out, n, "%s", b);
+  char *pt = NULL;
+  for (char *q = out; *q; q++) {
+    if (*q == '.') pt = q;
+  }
+  if (pt) *pt = 0;
+  for (char *q = out; *q; q++) {
+    char c = *q;
+    int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+    if (!ok) *q = '_';
+  }
+  if (!out[0]) snprintf(out, n, "juego");
+}
+
+static void ajustes_guardar_nombre(const char *nombre) {
+  if (!nombre || !nombre[0]) return;
+  char id[96], ruta[160];
+  id_de_nombre(nombre, id, sizeof(id));
+  snprintf(ruta, sizeof(ruta), "/data/swan/ajuste_%s.txt", id);
+  FILE *f = fopen(ruta, "wb");
+  if (!f) return;
+  int marco = g_marco_on ? g_marco_idx : g_nmarcos;
+  fprintf(f, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit, g_s2x ? 1 : 0,
+          g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco);
+  fclose(f);
+  esp("AJUSTES: guardados para %s", id);
+}
+
+static void ajustes_cargar_nombre(const char *nombre) {
+  if (!nombre || !nombre[0]) return;
+  char id[96], ruta[160];
+  id_de_nombre(nombre, id, sizeof(id));
+  snprintf(ruta, sizeof(ruta), "/data/swan/ajuste_%s.txt", id);
+  FILE *f = fopen(ruta, "rb");
+  if (!f) { esp("AJUSTES: %s sin ajustes propios", id); return; }
+  int v[12];
+  int n = fscanf(f, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8],
+                 &v[9], &v[10], &v[11]);
+  fclose(f);
+  if (n != 12 || v[0] < 0 || v[0] > 3 || v[2] < 0 || v[2] > 2 || v[3] < 0 || v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 ||
+      v[6] > 2 || v[7] < 0 || v[7] > 4) {
+    esp("AJUSTES: archivo de %s no valido", id);
+    return;
+  }
+  g_modo = v[0];
+  g_asp = v[1] ? 1 : 0;
+  g_suav = v[2];
+  g_aa = v[3];
+  g_nit = v[4];
+  g_s2x = v[5] ? 1 : 0;
+  g_crt = v[6];
+  g_color = v[7];
+  g_fps_on = v[8] ? 1 : 0;
+  g_recorte = v[9] ? 1 : 0;
+  g_nitido = v[10] ? 1 : 0;
+  marco_fijar(v[11]);
+  esp("AJUSTES: cargados para %s", id);
+}
+
 /* Calidad: 0 Mejor, 1 Equilibrada, 2 Rapida. Devuelve -1 si los ajustes no coinciden con ninguna */
 static int calidad_actual(void) {
   if (g_suav == 2 && g_aa == 1 && g_nit == 1 && g_s2x == 0 && g_color == 1) return 0;
@@ -2815,13 +2991,15 @@ static void menu_refrescar(void) {
     else if (q == 2) snprintf(g_ml[14], sizeof(g_ml[14]), "Calidad: Rapida  (izq/der)");
     else snprintf(g_ml[14], sizeof(g_ml[14]), "Calidad: Personalizada  (izq/der)");
   }
-  snprintf(g_ml[15], sizeof(g_ml[15]), "Continuar");
-  snprintf(g_ml[16], sizeof(g_ml[16]), "Volver al menu de juegos  (triangulo)");
-  snprintf(g_ml[17], sizeof(g_ml[17]), "Salir de la app");
-  g_menu_n = 18;
+  snprintf(g_ml[15], sizeof(g_ml[15]), "Recorte auto: %s  (solo Maxima)", g_recorte ? "Si" : "No");
+  snprintf(g_ml[16], sizeof(g_ml[16]), "Escalado nitido: %s", g_nitido ? "Si" : "No");
+  snprintf(g_ml[17], sizeof(g_ml[17]), "Continuar");
+  snprintf(g_ml[18], sizeof(g_ml[18]), "Volver al menu de juegos  (triangulo)");
+  snprintf(g_ml[19], sizeof(g_ml[19]), "Salir de la app");
+  g_menu_n = 20;
   if (disco_total() > 1) {
-    snprintf(g_ml[18], sizeof(g_ml[18]), "Disco: %d de %d  (izq/der)", (int)g_dc.get_image_index() + 1, disco_total());
-    g_menu_n = 19;
+    snprintf(g_ml[20], sizeof(g_ml[20]), "Disco: %d de %d  (izq/der)", (int)g_dc.get_image_index() + 1, disco_total());
+    g_menu_n = 21;
   }
 }
 
@@ -2873,7 +3051,9 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 12) color_cambiar(dx);
       else if (g_menu_sel == 13) fps_cambiar();
       else if (g_menu_sel == 14) calidad_cambiar(dx);
-      else if (g_menu_sel == 18) disco_cambiar(dx);
+      else if (g_menu_sel == 15) recorte_cambiar(dx);
+      else if (g_menu_sel == 16) nitido_cambiar(dx);
+      else if (g_menu_sel == 20) disco_cambiar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 9)) {
@@ -2897,13 +3077,15 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 12) color_cambiar(1);
       else if (g_menu_sel == 13) fps_cambiar();
       else if (g_menu_sel == 14) calidad_cambiar(1);
-      else if (g_menu_sel == 15) salir = 1;
-      else if (g_menu_sel == 18) disco_cambiar(1);
-      else if (g_menu_sel == 16) {
+      else if (g_menu_sel == 15) recorte_cambiar(1);
+      else if (g_menu_sel == 16) nitido_cambiar(1);
+      else if (g_menu_sel == 17) salir = 1;
+      else if (g_menu_sel == 20) disco_cambiar(1);
+      else if (g_menu_sel == 18) {
         if (conf) { g_volver = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para volver al menu (se cierra el juego)"); }
       }
-      else if (g_menu_sel == 17) {
+      else if (g_menu_sel == 19) {
         if (conf) { g_salir = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para cerrar la app"); }
       }
@@ -2915,6 +3097,7 @@ static void pausa_menu(void) {
     SDL_Delay(30);
   }
   g_menu_vis = 0;
+  ajustes_guardar_nombre(g_juego_id);
   esp("MENU opciones: cierra");
 }
 
@@ -3220,6 +3403,22 @@ inicio_menu:;
       if (c2 == '0' || c2 == '1') g_s2x = c2 - '0';
     }
     esp("SCALE2X inicial=%d", g_s2x);
+    {
+      FILE *fr = fopen("/data/swan/recorte.txt", "rb");
+      if (fr) {
+        int c = fgetc(fr);
+        fclose(fr);
+        if (c == '0' || c == '1') g_recorte = c - '0';
+      }
+      FILE *fnt = fopen("/data/swan/nitido.txt", "rb");
+      if (fnt) {
+        int c = fgetc(fnt);
+        fclose(fnt);
+        if (c == '0' || c == '1') g_nitido = c - '0';
+      }
+      esp("RECORTE inicial=%d nitido=%d", g_recorte, g_nitido);
+    }
+    ajustes_cargar_nombre(g_juego_id); /* ajustes propios de este juego, si los hay */
   }
   esp("DIBUJO hilo pedido=%d pf=%d", quiere_hilo, g_pf);
   if (!g_th_dib && quiere_hilo && (g_pf == 2 || g_pf == 0)) {
