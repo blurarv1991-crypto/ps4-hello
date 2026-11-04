@@ -650,11 +650,7 @@ static void abrir_pad2(void) {
       }
     }
   }
-  if (h < 0) {
-    int t = scePadOpen(g_uid1, 0, 1, NULL);
-    if (log) esp("PAD2   abrir mismo usuario indice 1 -> 0x%x", (unsigned)t);
-    if (t >= 0 && t != g_pad) h = t;
-  }
+  /* Solo se acepta el mando de OTRO usuario con sesion: abrir el indice 1 del mismo usuario devuelve el mismo mando 1 */
   if (h >= 0 && g_pad2 < 0) esp("PAD2 mando 2 abierto, handle=%d", h);
   if (h >= 0) g_pad2 = h;
 }
@@ -771,6 +767,7 @@ static void texto(float x, float y, const char *s) {
 }
 
 static void texto_col(float x, float y, int esc, int r, int g, int b, const char *s);
+static void panel_opciones(const int *map, int n, int sel, const char *hint, const char *msg);
 
 /* Pantallas de carga con imagen:
    /data/swan/inicio.png  -> al abrir la app (en lugar del fondo azul)
@@ -880,6 +877,12 @@ static void dibujar(void) {
 static int g_suav = 0;
 static int g_recorte = 1; /* recorte automatico de filas negras + imagen a alto completo (escala Maxima) */
 static int g_nitido = 1;  /* escalado nitido: interpolacion sin pixeles borrosos en horizontal y vertical */
+static int g_vineta = 0;  /* oscurece suavemente las esquinas de la imagen */
+static int g_brillo = 0;  /* -2 .. +2 */
+static SDL_Texture *g_tex_vig = NULL;
+static int g_vig_probada = 0;
+static char g_marco_nom[5][24]; /* nombres de los marcos: /data/swan/marco_nombres.txt (una linea por marco) */
+static int g_marco_nom_ok = 0;
 static int g_cr_t = -1, g_cr_b = -1;               /* filas negras detectadas arriba y abajo */
 static int g_cr_w = 0, g_cr_h = 0, g_cr_cnt = 0;
 static int g_cr_win = 0, g_cr_wt = 9999, g_cr_wb = 9999;
@@ -1566,6 +1569,55 @@ static void marco_fijar(int estado) { (void)estado; }
 #endif
 
 /* Pantalla de juego: modo 0 original, 1 = 2x, 2 = 3x, 3 = maximo */
+static void vineta_crear(void) {
+  g_vig_probada = 1;
+  const int VW = 192, VH = 108;
+  unsigned char *px = (unsigned char *)malloc((size_t)VW * VH * 4);
+  if (!px) return;
+  for (int y = 0; y < VH; y++) {
+    for (int x = 0; x < VW; x++) {
+      float nx = ((x + 0.5f) / VW) * 2.0f - 1.0f;
+      float ny = ((y + 0.5f) / VH) * 2.0f - 1.0f;
+      float d2 = (nx * nx + ny * ny) * 0.5f; /* 0 en el centro, 1 en las esquinas */
+      float a = (d2 - 0.25f) / 0.75f;
+      if (a < 0.0f) a = 0.0f;
+      a = a * a * 0.85f;
+      unsigned char *o = px + ((size_t)y * VW + x) * 4;
+      o[0] = 0; o[1] = 0; o[2] = 0;
+      o[3] = (unsigned char)(a * 255.0f);
+    }
+  }
+  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+  g_tex_vig = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, VW, VH);
+  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+  if (g_tex_vig) {
+    SDL_UpdateTexture(g_tex_vig, NULL, px, VW * 4);
+    SDL_SetTextureBlendMode(g_tex_vig, SDL_BLENDMODE_BLEND);
+  }
+  free(px);
+  esp("VINETA textura %s", g_tex_vig ? "creada" : "no se pudo crear");
+}
+
+/* Viñeta y brillo encima de la zona donde se dibujo el juego */
+static void overlay_juego(const SDL_Rect *r) {
+  if (g_vineta) {
+    if (!g_vig_probada) vineta_crear();
+    if (g_tex_vig) SDL_RenderCopy(R, g_tex_vig, NULL, r);
+  }
+  if (g_brillo != 0) {
+    if (g_brillo > 0) {
+      int v = 16 * g_brillo;
+      SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_ADD);
+      SDL_SetRenderDrawColor(R, (Uint8)v, (Uint8)v, (Uint8)v, 255);
+    } else {
+      SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
+      SDL_SetRenderDrawColor(R, 0, 0, 0, (Uint8)(30 * (-g_brillo)));
+    }
+    SDL_RenderFillRect(R, r);
+    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
+  }
+}
+
 static void dibujar_juego_interno(void) {
   double t0 = ahora_us();
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
@@ -1623,6 +1675,7 @@ static void dibujar_juego_interno(void) {
       if (z3.w > 0) SDL_RenderCopy(R, g_marco_tex, &z3, &z3);
       if (z4.w > 0) SDL_RenderCopy(R, g_marco_tex, &z4, &z4);
       SDL_RenderCopy(R, gt, gsrc, &g_marco_hueco);
+      overlay_juego(&g_marco_hueco);
       SDL_SetTextureBlendMode(g_marco_tex, SDL_BLENDMODE_BLEND);
       for (int bi = 0; bi < g_nbandas; bi++) {
         int by = g_bandas[bi].y, bh = g_bandas[bi].h, bl = g_bandas[bi].l, br = g_bandas[bi].r;
@@ -1637,6 +1690,7 @@ static void dibujar_juego_interno(void) {
       }
     } else {
       SDL_RenderCopy(R, gt, gsrc, &g_marco_hueco);
+      overlay_juego(&g_marco_hueco);
       SDL_RenderCopy(R, g_marco_tex, NULL, NULL);
     }
     g_kreal = 1;
@@ -1647,6 +1701,7 @@ static void dibujar_juego_interno(void) {
     if (escalar_propio(kp, &W, &H)) {
       SDL_Rect dst = {(1920 - W) / 2, (1080 - H) / 2, W, H};
       SDL_RenderCopy(R, g_tex2, NULL, &dst);
+      overlay_juego(&dst);
       hecho = 1;
     }
   }
@@ -1655,8 +1710,12 @@ static void dibujar_juego_interno(void) {
     if (g_modo == 0) g_kreal = 1;
     SDL_Rect dst = {(1920 - g_tw) / 2, (1080 - g_th) / 2, g_tw, g_th};
     SDL_RenderCopy(R, g_tex, NULL, &dst);
+    overlay_juego(&dst);
   }
-  if (g_menu_vis && g_fondo_opc) {
+  if (g_menu_vis && g_fondo_pop) {
+    /* menu de opciones con el mismo marco que el popup del menu de juegos */
+    panel_opciones(NULL, g_menu_n, g_menu_sel, "L3 O O: CERRAR   X: CAMBIAR   IZQ/DER: AJUSTAR", g_msg);
+  } else if (g_menu_vis && g_fondo_opc) {
     /* menu de opciones con el diseno de /data/swan/fondo_opciones.png (el panel de la imagen es transparente) */
     SDL_RenderSetScale(R, 1, 1);
     SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
@@ -2166,8 +2225,57 @@ static void portada_actualizar(int sel, int maxw, int maxh) {
 #define MENU_VIS 11   /* filas visibles de la lista */
 #define MENU_FILA 60  /* alto de cada fila, en pixeles */
 
+#ifdef HAY_STBI
+/* Letra pixelada con minusculas y acentos: /data/swan/fuente.png (16 columnas x 7 filas de celdas de 8x16) */
+static SDL_Texture *g_fuente = NULL;
+static int g_fuente_probada = 0;
+static const unsigned short FU_EXTRA[17] = {0xE1, 0xE9, 0xED, 0xF3, 0xFA, 0xFC, 0xF1, 0xC1, 0xC9, 0xCD, 0xD3, 0xDA, 0xDC, 0xD1, 0xBF, 0xA1, 0xB0};
+static int fu_indice(unsigned cp) {
+  if (cp >= 32 && cp <= 126) return (int)cp - 32;
+  for (int i = 0; i < 17; i++) {
+    if (FU_EXTRA[i] == cp) return 95 + i;
+  }
+  return '?' - 32;
+}
+static int texto_fuente(float x, float y, int esc, int r, int g, int b, const char *s) {
+  if (!g_fuente_probada) {
+    g_fuente_probada = 1;
+    g_fuente = png_a_textura("/data/swan/fuente.png");
+    esp("FUENTE %s", g_fuente ? "cargada" : "no hay /data/swan/fuente.png (letra basica)");
+  }
+  if (!g_fuente) return 0;
+  int sc = (esc <= 2) ? 1 : esc - 1;
+  int dy = (7 * esc - 10 * sc) / 2 - 4 * sc;
+  SDL_RenderSetScale(R, 1, 1);
+  SDL_SetTextureColorMod(g_fuente, (Uint8)r, (Uint8)g, (Uint8)b);
+  int px = (int)x;
+  const unsigned char *p = (const unsigned char *)s;
+  int cnt = 0;
+  while (*p && cnt < 200) {
+    unsigned cp = *p++;
+    if (cp >= 0xC0 && cp < 0xE0 && (*p & 0xC0) == 0x80) {
+      cp = ((cp & 0x1Fu) << 6) | (unsigned)(*p & 0x3F);
+      p++;
+    } else if (cp >= 0x80) {
+      while ((*p & 0xC0) == 0x80) p++;
+      cp = '?';
+    }
+    int idx = fu_indice(cp);
+    SDL_Rect sr = {(idx % 16) * 8, (idx / 16) * 16, 8, 16};
+    SDL_Rect dr = {px, (int)y + dy, 8 * sc, 16 * sc};
+    SDL_RenderCopy(R, g_fuente, &sr, &dr);
+    px += 8 * sc;
+    cnt++;
+  }
+  return 1;
+}
+#endif
+
 /* Texto con escala y color propios. x, y en pixeles de pantalla (1920x1080). */
 static void texto_col(float x, float y, int esc, int r, int g, int b, const char *s) {
+#ifdef HAY_STBI
+  if (texto_fuente(x, y, esc, r, g, b, s)) return;
+#endif
   static char buf[60000];
   char limpio[200];
   size_t n = 0;
@@ -2240,15 +2348,17 @@ static void fps_cambiar(void);
 static void calidad_cambiar(int d);
 static void recorte_cambiar(int d);
 static void nitido_cambiar(int d);
+static void vineta_cambiar(int d);
+static void brillo_cambiar(int d);
 static void ajustes_guardar_nombre(const char *nombre);
 static void ajustes_cargar_nombre(const char *nombre);
 static void menu_refrescar(void);
 
 /* ---- Opciones antes de entrar al juego (triangulo en el menu de juegos) ---- */
 static int g_pop_vis = 0, g_pop_sel = 0;
-#define POP_N 15
+#define POP_N 17
 /* lineas de menu_refrescar() que valen sin juego cargado (Escala ... Calidad, Continuar) */
-static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17};
+static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19};
 
 static void pop_ajustar(int idx, int dx) {
   g_msg[0] = 0;
@@ -2267,43 +2377,75 @@ static void pop_ajustar(int idx, int dx) {
     case 14: calidad_cambiar(dx); break;
     case 15: recorte_cambiar(dx); break;
     case 16: nitido_cambiar(dx); break;
+    case 17: vineta_cambiar(dx); break;
+    case 18: brillo_cambiar(dx); break;
     default: break;
   }
   menu_refrescar();
+}
+
+/* Panel de opciones con el marco de /data/swan/fondo_popup.png.
+   map = indices de g_ml a mostrar (NULL = todos en orden). Se mueve solo si hay mas de 15 filas. */
+static void panel_opciones(const int *map, int n, int sel, const char *hint, const char *msg) {
+  const float sc = 1100.0f / 1287.0f;
+  const int dw = 1100, dh = (int)(1006 * sc), dx = (1920 - dw) / 2, dy = (1080 - dh) / 2;
+  const int ix0 = dx + (int)(37 * sc), iy0 = dy + (int)(118 * sc);
+  const int ix1 = dx + (int)(1253 * sc), iy1 = dy + (int)(970 * sc);
+  static unsigned ult = 0;
+  static int anim = 8;
+  unsigned ahora = SDL_GetTicks();
+  if (ahora - ult > 160) anim = 0; /* acaba de abrirse: entra con fundido */
+  ult = ahora;
+  SDL_RenderSetScale(R, 1, 1);
+  SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(R, 10, 18, 64, 255);
+  SDL_Rect pf = {ix0 - 3, iy0 - 3, ix1 - ix0 + 6, iy1 - iy0 + 6};
+  SDL_RenderFillRect(R, &pf);
+  SDL_Rect dr = {dx, dy, dw, dh};
+  SDL_RenderCopy(R, g_fondo_pop, NULL, &dr);
+  texto_col((float)(ix0 + 24), (float)(iy0 + 14), 2, 175, 180, 220, hint);
+  if (g_pad2 >= 0) texto_col((float)(ix1 - 200), (float)(iy0 + 14), 2, 120, 220, 120, "J2: conectado");
+  else texto_col((float)(ix1 - 200), (float)(iy0 + 14), 2, 130, 130, 160, "J2: no");
+  int vis = (n < 15) ? n : 15;
+  if (vis < 1) vis = 1;
+  int top = sel - 7;
+  if (top > n - vis) top = n - vis;
+  if (top < 0) top = 0;
+  int sp = (iy1 - iy0 - 116) / vis;
+  if (sp > 50) sp = 50;
+  for (int k = 0; k < vis; k++) {
+    int mi = top + k;
+    if (mi >= n) break;
+    int y = iy0 + 52 + k * sp;
+    const char *t = g_ml[map ? map[mi] : mi];
+    if (mi == sel) {
+      SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
+      SDL_Rect bar = {ix0 + 6, y, ix1 - ix0 - 12, sp - 4};
+      SDL_RenderFillRect(R, &bar);
+      texto_col((float)(ix0 + 24), (float)(y + (sp - 4 - 24) / 2), 3, 20, 20, 40, t);
+    } else {
+      texto_col((float)(ix0 + 24), (float)(y + (sp - 4 - 24) / 2), 3, 255, 255, 255, t);
+    }
+  }
+  texto_col((float)(ix0 + 24), (float)(iy1 - 34), 2, 255, 255, 255, msg);
+  char cn[16];
+  snprintf(cn, sizeof(cn), "%d/%d", sel + 1, n);
+  texto_col((float)(ix1 - 110), (float)(iy1 - 34), 2, 175, 180, 220, cn);
+  if (anim < 8) {
+    anim++;
+    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(R, 0, 0, 0, (Uint8)((8 - anim) * 255 / 8));
+    SDL_Rect fr = {dx, dy, dw, dh};
+    SDL_RenderFillRect(R, &fr);
+    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
+  }
 }
 
 static void dibujar_popup_opciones(void) {
   if (!g_pop_vis) return;
   menu_refrescar();
   if (g_fondo_pop) {
-    /* diseno de /data/swan/fondo_popup.png (1287x1006, panel interior transparente en x37..1253, y118..970) */
-    const float sc = 1100.0f / 1287.0f;
-    const int dw = 1100, dh = (int)(1006 * sc), dx = (1920 - dw) / 2, dy = (1080 - dh) / 2;
-    const int ix0 = dx + (int)(37 * sc), iy0 = dy + (int)(118 * sc);
-    const int ix1 = dx + (int)(1253 * sc), iy1 = dy + (int)(970 * sc);
-    SDL_RenderSetScale(R, 1, 1);
-    SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
-    SDL_SetRenderDrawColor(R, 10, 18, 64, 255);
-    SDL_Rect pf = {ix0 - 3, iy0 - 3, ix1 - ix0 + 6, iy1 - iy0 + 6};
-    SDL_RenderFillRect(R, &pf);
-    SDL_Rect dr = {dx, dy, dw, dh};
-    SDL_RenderCopy(R, g_fondo_pop, NULL, &dr);
-    texto_col((float)(ix0 + 24), (float)(iy0 + 14), 2, 175, 180, 220, "TRIANGULO O O: CERRAR   X: CAMBIAR   IZQ/DER: AJUSTAR");
-    int sp = (iy1 - iy0 - 116) / POP_N;
-    if (sp > 50) sp = 50;
-    for (int k = 0; k < POP_N; k++) {
-      int y = iy0 + 52 + k * sp;
-      const char *t = g_ml[POP_IDX[k]];
-      if (k == g_pop_sel) {
-        SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
-        SDL_Rect bar = {ix0 + 6, y, ix1 - ix0 - 12, sp - 4};
-        SDL_RenderFillRect(R, &bar);
-        texto_col((float)(ix0 + 24), (float)(y + (sp - 4 - 24) / 2), 3, 20, 20, 40, t);
-      } else {
-        texto_col((float)(ix0 + 24), (float)(y + (sp - 4 - 24) / 2), 3, 255, 255, 255, t);
-      }
-    }
-    texto_col((float)(ix0 + 24), (float)(iy1 - 34), 2, 255, 255, 255, g_msg);
+    panel_opciones(POP_IDX, POP_N, g_pop_sel, "TRIANGULO O O: CERRAR   X: CAMBIAR   IZQ/DER: AJUSTAR", g_msg);
     return;
   }
   const int PW = 900, PH = 860, PX = (1920 - PW) / 2, PY = 100;
@@ -2311,15 +2453,15 @@ static void dibujar_popup_opciones(void) {
   texto_col(PX + 40, PY + 24, 4, 240, 190, 0, "OPCIONES");
   texto_col(PX + 40, PY + 74, 2, 175, 180, 220, "TRIANGULO O O: CERRAR   X: CAMBIAR   IZQ/DER: AJUSTAR");
   for (int k = 0; k < POP_N; k++) {
-    int y = PY + 108 + k * 46;
+    int y = PY + 104 + k * 40;
     const char *t = g_ml[POP_IDX[k]];
     if (k == g_pop_sel) {
       SDL_SetRenderDrawColor(R, 240, 190, 0, 255);
-      SDL_Rect bar = {PX + 24, y, PW - 48, 42};
+      SDL_Rect bar = {PX + 24, y, PW - 48, 36};
       SDL_RenderFillRect(R, &bar);
-      texto_col(PX + 44, y + 9, 3, 20, 20, 40, t);
+      texto_col(PX + 44, y + 6, 3, 20, 20, 40, t);
     } else {
-      texto_col(PX + 44, y + 9, 3, 255, 255, 255, t);
+      texto_col(PX + 44, y + 6, 3, 255, 255, 255, t);
     }
   }
   texto_col(PX + 40, PY + PH - 40, 2, 255, 255, 255, g_msg);
@@ -2658,7 +2800,7 @@ static int elegir_juego(char *out, size_t outn) {
         int idx = POP_IDX[g_pop_sel];
         if (dx != 0) pop_ajustar(idx, dx);
         if (nuevos & PB_CROSS) {
-          if (idx == 17) { g_pop_vis = 0; ajustes_guardar_nombre(g_jn[sel]); }
+          if (idx == 19) { g_pop_vis = 0; ajustes_guardar_nombre(g_jn[sel]); }
           else pop_ajustar(idx, 1);
         }
         if (nuevos & (PB_TRIANGLE | PB_CIRCLE | PB_L3)) { g_pop_vis = 0; ajustes_guardar_nombre(g_jn[sel]); }
@@ -2866,6 +3008,23 @@ static void nitido_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Escalado nitido cambiado (no aplica con escala Original)");
 }
 
+static void vineta_cambiar(int d) {
+  (void)d;
+  g_vineta = !g_vineta;
+  guardar_num("/data/swan/vineta.txt", g_vineta);
+  esp("MENU: vineta = %d", g_vineta);
+  snprintf(g_msg, sizeof(g_msg), "Vineta cambiada");
+}
+
+static void brillo_cambiar(int d) {
+  g_brillo += (d > 0) ? 1 : -1;
+  if (g_brillo > 2) g_brillo = -2;
+  if (g_brillo < -2) g_brillo = 2;
+  guardar_num("/data/swan/brillo.txt", g_brillo + 2);
+  esp("MENU: brillo = %d", g_brillo);
+  snprintf(g_msg, sizeof(g_msg), "Brillo %+d", g_brillo);
+}
+
 /* ---- Ajustes de imagen por juego: /data/swan/ajuste_<juego>.txt ---- */
 static void id_de_nombre(const char *nombre, char *out, size_t n) {
   const char *b = nombre;
@@ -2894,8 +3053,8 @@ static void ajustes_guardar_nombre(const char *nombre) {
   FILE *f = fopen(ruta, "wb");
   if (!f) return;
   int marco = g_marco_on ? g_marco_idx : g_nmarcos;
-  fprintf(f, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit, g_s2x ? 1 : 0,
-          g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco);
+  fprintf(f, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit, g_s2x ? 1 : 0,
+          g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco, g_vineta ? 1 : 0, g_brillo + 2);
   fclose(f);
   esp("AJUSTES: guardados para %s", id);
 }
@@ -2907,11 +3066,21 @@ static void ajustes_cargar_nombre(const char *nombre) {
   snprintf(ruta, sizeof(ruta), "/data/swan/ajuste_%s.txt", id);
   FILE *f = fopen(ruta, "rb");
   if (!f) { esp("AJUSTES: %s sin ajustes propios", id); return; }
-  int v[12];
-  int n = fscanf(f, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8],
-                 &v[9], &v[10], &v[11]);
+  char linea[256];
+  linea[0] = 0;
+  if (!fgets(linea, sizeof(linea), f)) linea[0] = 0;
   fclose(f);
-  if (n != 12 || v[0] < 0 || v[0] > 3 || v[2] < 0 || v[2] > 2 || v[3] < 0 || v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 ||
+  int v[14] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, g_vineta ? 1 : 0, g_brillo + 2};
+  int n = sscanf(linea, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7],
+                 &v[8], &v[9], &v[10], &v[11], &v[12], &v[13]);
+  if (n != 14) {
+    v[12] = g_vineta ? 1 : 0;
+    v[13] = g_brillo + 2;
+    n = sscanf(linea, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8],
+               &v[9], &v[10], &v[11]);
+    if (n == 12) n = 14;
+  }
+  if (n != 14 || v[13] < 0 || v[13] > 4 || v[0] < 0 || v[0] > 3 || v[2] < 0 || v[2] > 2 || v[3] < 0 || v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 ||
       v[6] > 2 || v[7] < 0 || v[7] > 4) {
     esp("AJUSTES: archivo de %s no valido", id);
     return;
@@ -2927,6 +3096,8 @@ static void ajustes_cargar_nombre(const char *nombre) {
   g_fps_on = v[8] ? 1 : 0;
   g_recorte = v[9] ? 1 : 0;
   g_nitido = v[10] ? 1 : 0;
+  g_vineta = v[12] ? 1 : 0;
+  g_brillo = v[13] - 2;
   marco_fijar(v[11]);
   esp("AJUSTES: cargados para %s", id);
 }
@@ -2972,6 +3143,19 @@ static void disco_cambiar(int d) {
 }
 
 static void menu_refrescar(void) {
+  if (!g_marco_nom_ok) {
+    g_marco_nom_ok = 1;
+    FILE *fn = fopen("/data/swan/marco_nombres.txt", "rb");
+    if (fn) {
+      char ln[64];
+      for (int i = 0; i < 5 && fgets(ln, sizeof(ln), fn); i++) {
+        size_t L = strlen(ln);
+        while (L > 0 && (ln[L - 1] == '\n' || ln[L - 1] == '\r' || ln[L - 1] == ' ')) ln[--L] = 0;
+        snprintf(g_marco_nom[i], sizeof(g_marco_nom[i]), "%s", ln);
+      }
+      fclose(fn);
+    }
+  }
   const char *esc[4] = {"Original", "2x", "3x", "Maxima"};
   snprintf(g_ml[0], sizeof(g_ml[0]), "Guardar estado");
   snprintf(g_ml[1], sizeof(g_ml[1]), "Cargar estado");
@@ -2989,6 +3173,8 @@ static void menu_refrescar(void) {
   snprintf(g_ml[10], sizeof(g_ml[10]), "Efecto CRT: %s  (izq/der)", cr[g_crt % 3]);
   if (g_nmarcos <= 0) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: no hay marco.png");
   else if (!g_marco_on) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: Ninguno  (izq/der)");
+  else if (g_marco_idx >= 0 && g_marco_idx < 5 && g_marco_nom[g_marco_idx][0])
+    snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: %s (%d de %d)  (izq/der)", g_marco_nom[g_marco_idx], g_marco_idx + 1, g_nmarcos);
   else snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: %d de %d  (izq/der)", g_marco_idx + 1, g_nmarcos);
   const char *co[5] = {"Original", "Natural", "Vivido", "Calido", "Retro"};
   snprintf(g_ml[12], sizeof(g_ml[12]), "Color: %s  (izq/der)", co[g_color % 5]);
@@ -3002,13 +3188,15 @@ static void menu_refrescar(void) {
   }
   snprintf(g_ml[15], sizeof(g_ml[15]), "Recorte auto: %s  (solo Maxima)", g_recorte ? "Si" : "No");
   snprintf(g_ml[16], sizeof(g_ml[16]), "Escalado nitido: %s", g_nitido ? "Si" : "No");
-  snprintf(g_ml[17], sizeof(g_ml[17]), "Continuar");
-  snprintf(g_ml[18], sizeof(g_ml[18]), "Volver al menu de juegos  (triangulo)");
-  snprintf(g_ml[19], sizeof(g_ml[19]), "Salir de la app");
-  g_menu_n = 20;
+  snprintf(g_ml[17], sizeof(g_ml[17]), "Vineta: %s  (izq/der)", g_vineta ? "Si" : "No");
+  snprintf(g_ml[18], sizeof(g_ml[18]), "Brillo: %+d  (izq/der)", g_brillo);
+  snprintf(g_ml[19], sizeof(g_ml[19]), "Continuar");
+  snprintf(g_ml[20], sizeof(g_ml[20]), "Volver al menu de juegos  (triangulo)");
+  snprintf(g_ml[21], sizeof(g_ml[21]), "Salir de la app");
+  g_menu_n = 22;
   if (disco_total() > 1) {
-    snprintf(g_ml[20], sizeof(g_ml[20]), "Disco: %d de %d  (izq/der)", (int)g_dc.get_image_index() + 1, disco_total());
-    g_menu_n = 21;
+    snprintf(g_ml[22], sizeof(g_ml[22]), "Disco: %d de %d  (izq/der)", (int)g_dc.get_image_index() + 1, disco_total());
+    g_menu_n = 23;
   }
 }
 
@@ -3062,7 +3250,9 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 14) calidad_cambiar(dx);
       else if (g_menu_sel == 15) recorte_cambiar(dx);
       else if (g_menu_sel == 16) nitido_cambiar(dx);
-      else if (g_menu_sel == 20) disco_cambiar(dx);
+      else if (g_menu_sel == 17) vineta_cambiar(dx);
+      else if (g_menu_sel == 18) brillo_cambiar(dx);
+      else if (g_menu_sel == 22) disco_cambiar(dx);
     }
     if (nw & (1u << 8)) salir = 1;
     if (nw & (1u << 9)) {
@@ -3088,13 +3278,15 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 14) calidad_cambiar(1);
       else if (g_menu_sel == 15) recorte_cambiar(1);
       else if (g_menu_sel == 16) nitido_cambiar(1);
-      else if (g_menu_sel == 17) salir = 1;
-      else if (g_menu_sel == 20) disco_cambiar(1);
-      else if (g_menu_sel == 18) {
+      else if (g_menu_sel == 17) vineta_cambiar(1);
+      else if (g_menu_sel == 18) brillo_cambiar(1);
+      else if (g_menu_sel == 19) salir = 1;
+      else if (g_menu_sel == 22) disco_cambiar(1);
+      else if (g_menu_sel == 20) {
         if (conf) { g_volver = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para volver al menu (se cierra el juego)"); }
       }
-      else if (g_menu_sel == 19) {
+      else if (g_menu_sel == 21) {
         if (conf) { g_salir = 1; salir = 1; }
         else { conf = 1; snprintf(g_msg, sizeof(g_msg), "Pulsa X otra vez para cerrar la app"); }
       }
@@ -3427,7 +3619,19 @@ inicio_menu:;
         fclose(fnt);
         if (c == '0' || c == '1') g_nitido = c - '0';
       }
-      esp("RECORTE inicial=%d nitido=%d", g_recorte, g_nitido);
+      FILE *fv = fopen("/data/swan/vineta.txt", "rb");
+      if (fv) {
+        int c = fgetc(fv);
+        fclose(fv);
+        if (c == '0' || c == '1') g_vineta = c - '0';
+      }
+      FILE *fb = fopen("/data/swan/brillo.txt", "rb");
+      if (fb) {
+        int c = fgetc(fb);
+        fclose(fb);
+        if (c >= '0' && c <= '4') g_brillo = c - '0' - 2;
+      }
+      esp("RECORTE inicial=%d nitido=%d vineta=%d brillo=%d", g_recorte, g_nitido, g_vineta, g_brillo);
     }
     ajustes_cargar_nombre(g_juego_id); /* ajustes propios de este juego, si los hay */
   }
