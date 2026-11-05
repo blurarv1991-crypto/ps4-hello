@@ -878,14 +878,11 @@ static void dibujar(void) {
 static int g_suav = 0;
 static int g_recorte = 1; /* recorte automatico de filas negras + imagen a alto completo (escala Maxima) */
 static int g_nitido = 1;  /* escalado nitido: interpolacion sin pixeles borrosos en horizontal y vertical */
-static int g_vineta = 0;  /* oscurece suavemente las esquinas de la imagen */
 static SDL_Texture *g_ops_fondo = NULL;  /* /data/swan/ops_fondo.png: paneles del menu de opciones en el juego */
 static SDL_Texture *g_ops_iconos = NULL; /* /data/swan/ops_iconos.png: 6 iconos de 96x96 apilados */
 static int g_ops_ui = 0;                 /* 1 = el menu del juego usa el diseno con secciones */
 static int g_ops_cat = 0, g_ops_fila = 0;
 static int g_brillo = 0;  /* -2 .. +2 */
-static SDL_Texture *g_tex_vig = NULL;
-static int g_vig_probada = 0;
 static char g_marco_nom[5][24]; /* nombres de los marcos: /data/swan/marco_nombres.txt (una linea por marco) */
 static int g_marco_nom_ok = 0;
 static int g_cr_t = -1, g_cr_b = -1;               /* filas negras detectadas arriba y abajo */
@@ -1199,70 +1196,264 @@ static void recorte_actualizar(int w, int h) {
   if (g_cr_t != t0 || g_cr_b != b0) esp("RECORTE: %dx%d filas negras arriba=%d abajo=%d", w, h, g_cr_t, g_cr_b);
 }
 
-/* Vineta "horneada": se multiplica directo en el buffer ya escalado (rapido, sin mezcla de SDL).
-   La tabla (0..32 por pixel) se calcula una sola vez por tamano. */
-static uint8_t *g_vt = NULL;
-static int g_vt_W = 0, g_vt_H = 0;
-static short g_vt_a[1100], g_vt_b[1100]; /* por fila: zona central sin oscurecer [a, b) */
-static int g_vig_horneada = 0;
+/* ---- Reescalado bicubico (Catmull-Rom) y "sin puntitos" (quita el dithering del juego) ----
+   La imagen se expande a 8 bits por canal (x16, en int16) y se estira en dos pasadas:
+   vertical a la anchura original (barata) y horizontal a la anchura final (SSE2 si existe). */
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#define BIC_SSE 1
+#endif
 
-static int vineta_tabla(int W, int H) {
-  if (g_vt && g_vt_W == W && g_vt_H == H) return 1;
-  if (W < 1 || H < 1 || W > 1920 || H > 1100) return 0;
-  uint8_t *t = (uint8_t *)realloc(g_vt, (size_t)W * (size_t)H);
-  if (!t) return 0;
-  g_vt = t;
-  g_vt_W = 0;
-  g_vt_H = 0;
-  static float nx2[1920];
-  for (int x = 0; x < W; x++) {
-    float nx = ((x + 0.5f) / W) * 2.0f - 1.0f;
-    nx2[x] = nx * nx;
+static int g_bic = 0; /* reescalado bicubico: 0 No, 1 Si */
+static int g_dd = 0;  /* sin puntitos (dithering): 0 No, 1 Suave, 2 Fuerte */
+
+#define BIC_MAXPIX (640 * 512)
+#define BIC_MAXW 1024
+static int16_t *g_bx_a = NULL, *g_bx_b = NULL, *g_bx_t = NULL;
+static int16_t g_bw[1920][16]; /* pesos horizontales: 4 taps x 4 canales por pixel de salida */
+static int g_bh_i[1920];       /* primer tap (indice de pixel en g_bx_t) */
+static int g_bh_n = 0, g_bh_N = 0;
+static int g_bv_r[1080][4];
+static int16_t g_bv_w[1080][4];
+static int g_bv_n = 0, g_bv_N = 0;
+
+/* pesos Catmull-Rom en Q15; la suma es exacta para que los colores planos no cambien */
+static void bic_pesos(float t, int16_t *w) {
+  float t2 = t * t, t3 = t2 * t;
+  float f[4];
+  f[0] = (-t3 + 2.0f * t2 - t) * 0.5f;
+  f[1] = (3.0f * t3 - 5.0f * t2 + 2.0f) * 0.5f;
+  f[2] = (-3.0f * t3 + 4.0f * t2 + t) * 0.5f;
+  f[3] = (t3 - t2) * 0.5f;
+  int q[4];
+  for (int k = 0; k < 4; k++) q[k] = (int)(f[k] * 32768.0f + (f[k] >= 0.0f ? 0.5f : -0.5f));
+  q[1] = 32768 - q[0] - q[2] - q[3];
+  for (int k = 0; k < 4; k++) {
+    if (q[k] > 32767) q[k] = 32767;
+    if (q[k] < -32768) q[k] = -32768;
+    w[k] = (int16_t)q[k];
   }
-  for (int y = 0; y < H; y++) {
-    float ny = ((y + 0.5f) / H) * 2.0f - 1.0f;
-    float ny2 = ny * ny;
-    uint8_t *row = g_vt + (size_t)y * (size_t)W;
-    int f = -1, l = -1;
-    for (int x = 0; x < W; x++) {
-      float d2 = (nx2[x] + ny2) * 0.5f; /* 0 en el centro, 1 en las esquinas */
-      float a = (d2 - 0.25f) / 0.75f;
-      if (a < 0.0f) a = 0.0f;
-      a = a * a * 0.85f;
-      int v = (int)((1.0f - a) * 32.0f + 0.5f);
-      if (v > 32) v = 32;
-      if (v < 0) v = 0;
-      row[x] = (uint8_t)v;
-      if (v == 32) { if (f < 0) f = x; l = x; }
+}
+
+static void bic_tablas(int sw, int nch, int W, int H) {
+  if (g_bh_n != sw || g_bh_N != W) {
+    for (int ox = 0; ox < W; ox++) {
+      float u = ((float)ox + 0.5f) * (float)sw / (float)W - 0.5f;
+      int fl = (u < 0.0f) ? -1 : (int)u;
+      float t = u - (float)fl;
+      int16_t w[4];
+      bic_pesos(t, w);
+      g_bh_i[ox] = fl + 1; /* tap 0 = pixel fl-1; en g_bx_t hay 2 pixeles de relleno a la izquierda */
+      for (int k = 0; k < 4; k++)
+        for (int c = 0; c < 4; c++) g_bw[ox][k * 4 + c] = w[k];
     }
-    if (f < 0) { g_vt_a[y] = (short)W; g_vt_b[y] = (short)W; }
-    else { g_vt_a[y] = (short)f; g_vt_b[y] = (short)(l + 1); }
+    g_bh_n = sw;
+    g_bh_N = W;
   }
-  g_vt_W = W;
-  g_vt_H = H;
+  if (g_bv_n != nch || g_bv_N != H) {
+    for (int oy = 0; oy < H; oy++) {
+      float v = ((float)oy + 0.5f) * (float)nch / (float)H - 0.5f;
+      int fl = (v < 0.0f) ? -1 : (int)v;
+      float t = v - (float)fl;
+      bic_pesos(t, g_bv_w[oy]);
+      for (int k = 0; k < 4; k++) {
+        int r = fl - 1 + k;
+        if (r < 0) r = 0;
+        if (r > nch - 1) r = nch - 1;
+        g_bv_r[oy][k] = r;
+      }
+    }
+    g_bv_n = nch;
+    g_bv_N = H;
+  }
+}
+
+static void bic_expandir(const uint16_t *src, int sw, int cr0, int nch, int16_t *dst) {
+  static int16_t l5[32], l6[64];
+  static int ini = 0;
+  if (!ini) {
+    for (int i = 0; i < 32; i++) l5[i] = (int16_t)((((i << 3) | (i >> 2))) << 4);
+    for (int i = 0; i < 64; i++) l6[i] = (int16_t)((((i << 2) | (i >> 4))) << 4);
+    ini = 1;
+  }
+  for (int y = 0; y < nch; y++) {
+    const uint16_t *s = src + (size_t)(cr0 + y) * (size_t)sw;
+    int16_t *d = dst + (size_t)y * (size_t)sw * 4;
+    if (g_pf == 0) {
+      for (int x = 0; x < sw; x++, d += 4) {
+        uint16_t p = s[x];
+        d[0] = l5[(p >> 10) & 31]; d[1] = l5[(p >> 5) & 31]; d[2] = l5[p & 31]; d[3] = 0;
+      }
+    } else {
+      for (int x = 0; x < sw; x++, d += 4) {
+        uint16_t p = s[x];
+        d[0] = l5[(p >> 11) & 31]; d[1] = l6[(p >> 5) & 63]; d[2] = l5[p & 31]; d[3] = 0;
+      }
+    }
+  }
+}
+
+/* Sin puntitos: promedia cada pixel con los de su alrededor (3x3) que se parecen mucho (diferencia
+   menor que un escalon de color de 5 bits). Los bordes de verdad no se tocan. Trabaja en 8 bits,
+   asi que los tonos intermedios del degradado si se pueden representar. */
+static void bic_dedither(const int16_t *src, int16_t *dst, int sw, int nch, int nivel) {
+  const int T = (nivel >= 2) ? 288 : 160; /* umbral en escala x16 (18 o 10 niveles de 8 bits) */
+  static unsigned recip[10];
+  static int ri = 0;
+  if (!ri) {
+    for (int i = 1; i <= 9; i++) recip[i] = (65536u + (unsigned)i / 2u) / (unsigned)i;
+    ri = 1;
+  }
+  for (int y = 0; y < nch; y++) {
+    const int16_t *r1 = src + (size_t)y * (size_t)sw * 4;
+    const int16_t *r0 = src + (size_t)(y > 0 ? y - 1 : 0) * (size_t)sw * 4;
+    const int16_t *r2 = src + (size_t)(y < nch - 1 ? y + 1 : nch - 1) * (size_t)sw * 4;
+    int16_t *d = dst + (size_t)y * (size_t)sw * 4;
+    for (int x = 0; x < sw; x++, d += 4) {
+      int xl = x > 0 ? x - 1 : 0, xr = x < sw - 1 ? x + 1 : sw - 1;
+      const int16_t *p[9] = {r0 + xl * 4, r0 + x * 4, r0 + xr * 4, r1 + xl * 4, r1 + x * 4,
+                             r1 + xr * 4, r2 + xl * 4, r2 + x * 4, r2 + xr * 4};
+      const int16_t *c = p[4];
+      uint64_t cv, ov;
+      memcpy(&cv, c, 8);
+      int igual = 1;
+      for (int k = 0; k < 9 && igual; k++) {
+        if (k == 4) continue;
+        memcpy(&ov, p[k], 8);
+        if (ov != cv) igual = 0;
+      }
+      if (igual) { memcpy(d, c, 8); continue; }
+      for (int ch = 0; ch < 3; ch++) {
+        int v = c[ch];
+        unsigned sum = 0, cnt = 0;
+        for (int k = 0; k < 9; k++) {
+          int q = p[k][ch];
+          int df = q - v;
+          if (df <= T && df >= -T) { sum += (unsigned)q; cnt++; }
+        }
+        d[ch] = (int16_t)((sum * recip[cnt] + 32768u) >> 16);
+      }
+      d[3] = 0;
+    }
+  }
+}
+
+static inline uint16_t bic_pack(int r, int g, int b) {
+  if (r < 0) r = 0; if (r > 255) r = 255;
+  if (g < 0) g = 0; if (g > 255) g = 255;
+  if (b < 0) b = 0; if (b > 255) b = 255;
+  if (g_pf == 0) return (uint16_t)(((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
+  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+/* src: imagen sw x (filas de origen); se usan nch filas desde cr0. Escribe W x H en g_sbuf. 1 = hecho */
+static int bic_escalar(const uint16_t *src, int sw, int cr0, int nch, int W, int H, int dd) {
+  if (sw < 8 || nch < 8 || sw > BIC_MAXW || (size_t)sw * (size_t)nch > (size_t)BIC_MAXPIX) return 0;
+  if (W < 2 || H < 2 || W > 1920 || H > 1080) return 0;
+  if (!g_bx_a || !g_bx_b || !g_bx_t) {
+    free(g_bx_a); free(g_bx_b); free(g_bx_t);
+    g_bx_a = (int16_t *)malloc(((size_t)BIC_MAXPIX + 16) * 8);
+    g_bx_b = (int16_t *)malloc(((size_t)BIC_MAXPIX + 16) * 8);
+    g_bx_t = (int16_t *)malloc(((size_t)BIC_MAXW + 16) * 8);
+    if (!g_bx_a || !g_bx_b || !g_bx_t) {
+      free(g_bx_a); free(g_bx_b); free(g_bx_t);
+      g_bx_a = g_bx_b = g_bx_t = NULL;
+      return 0;
+    }
+  }
+  bic_expandir(src, sw, cr0, nch, g_bx_a);
+  const int16_t *E = g_bx_a;
+  if (dd > 0) {
+    bic_dedither(g_bx_a, g_bx_b, sw, nch, dd);
+    E = g_bx_b;
+  }
+  bic_tablas(sw, nch, W, H);
+  const int nv = sw * 4;
+  int16_t *t = g_bx_t;
+#ifdef BIC_SSE
+  const __m128i zero = _mm_setzero_si128();
+  const __m128i vmax = _mm_set1_epi16(4080);
+  const __m128i c255 = _mm_set1_epi16(255);
+  const __m128i cuatro = _mm_set1_epi16(4);
+  const int p0 = (g_pf == 0);
+  const __m128i mulR = _mm_set1_epi16((short)(p0 ? 128 : 256));
+  const __m128i mulG = _mm_set1_epi16((short)(p0 ? 4 : 8));
+  const short mkR = (short)(p0 ? 0x7C00 : 0xF800), mkG = (short)(p0 ? 0x03E0 : 0x07E0);
+  const __m128i mR = _mm_set_epi16(0, 0, 0, mkR, 0, 0, 0, mkR);
+  const __m128i mG = _mm_set_epi16(0, 0, mkG, 0, 0, 0, mkG, 0);
+  const __m128i mB = _mm_set_epi16(0, 0x1F, 0, 0, 0, 0x1F, 0, 0);
+#endif
+  for (int oy = 0; oy < H; oy++) {
+    const int16_t *r0 = E + (size_t)g_bv_r[oy][0] * nv;
+    const int16_t *r1 = E + (size_t)g_bv_r[oy][1] * nv;
+    const int16_t *r2 = E + (size_t)g_bv_r[oy][2] * nv;
+    const int16_t *r3 = E + (size_t)g_bv_r[oy][3] * nv;
+    const int16_t *wv = g_bv_w[oy];
+#ifdef BIC_SSE
+    {
+      const __m128i w0 = _mm_set1_epi16(wv[0]), w1 = _mm_set1_epi16(wv[1]);
+      const __m128i w2 = _mm_set1_epi16(wv[2]), w3 = _mm_set1_epi16(wv[3]);
+      for (int i = 0; i < nv; i += 8) {
+        __m128i a = _mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)(r0 + i)), w0);
+        a = _mm_add_epi16(a, _mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)(r1 + i)), w1));
+        a = _mm_add_epi16(a, _mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)(r2 + i)), w2));
+        a = _mm_add_epi16(a, _mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)(r3 + i)), w3));
+        a = _mm_slli_epi16(a, 1);
+        a = _mm_min_epi16(_mm_max_epi16(a, zero), vmax);
+        _mm_storeu_si128((__m128i *)(t + 8 + i), a);
+      }
+    }
+#else
+    for (int i = 0; i < nv; i++) {
+      int a = ((r0[i] * wv[0]) >> 16) + ((r1[i] * wv[1]) >> 16) + ((r2[i] * wv[2]) >> 16) + ((r3[i] * wv[3]) >> 16);
+      a *= 2;
+      if (a < 0) a = 0;
+      if (a > 4080) a = 4080;
+      t[8 + i] = (int16_t)a;
+    }
+#endif
+    /* relleno de bordes: 2 pixeles a cada lado */
+    memcpy(t, t + 8, 8);
+    memcpy(t + 4, t + 8, 8);
+    memcpy(t + (size_t)(sw + 2) * 4, t + (size_t)(sw + 1) * 4, 8);
+    memcpy(t + (size_t)(sw + 3) * 4, t + (size_t)(sw + 1) * 4, 8);
+    uint16_t *d = g_sbuf + (size_t)oy * (size_t)W;
+    int ox = 0;
+#ifdef BIC_SSE
+    for (; ox + 1 < W; ox += 2) {
+      const int16_t *pa = t + (size_t)g_bh_i[ox] * 4;
+      const int16_t *pb = t + (size_t)g_bh_i[ox + 1] * 4;
+      const __m128i *wa = (const __m128i *)g_bw[ox];
+      const __m128i *wb = (const __m128i *)g_bw[ox + 1];
+      __m128i sa = _mm_add_epi16(_mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)pa), _mm_loadu_si128(wa)),
+                                 _mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)(pa + 8)), _mm_loadu_si128(wa + 1)));
+      __m128i sb = _mm_add_epi16(_mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)pb), _mm_loadu_si128(wb)),
+                                 _mm_mulhi_epi16(_mm_loadu_si128((const __m128i *)(pb + 8)), _mm_loadu_si128(wb + 1)));
+      sa = _mm_add_epi16(sa, _mm_srli_si128(sa, 8));
+      sb = _mm_add_epi16(sb, _mm_srli_si128(sb, 8));
+      __m128i v = _mm_unpacklo_epi64(sa, sb);
+      v = _mm_srai_epi16(_mm_add_epi16(v, cuatro), 3);
+      v = _mm_min_epi16(_mm_max_epi16(v, zero), c255);
+      __m128i tt = _mm_or_si128(_mm_or_si128(_mm_and_si128(_mm_mullo_epi16(v, mulR), mR),
+                                             _mm_and_si128(_mm_mullo_epi16(v, mulG), mG)),
+                                _mm_and_si128(_mm_srli_epi16(v, 3), mB));
+      tt = _mm_or_si128(_mm_or_si128(tt, _mm_srli_epi64(tt, 16)), _mm_srli_epi64(tt, 32));
+      d[ox] = (uint16_t)_mm_extract_epi16(tt, 0);
+      d[ox + 1] = (uint16_t)_mm_extract_epi16(tt, 4);
+    }
+#endif
+    for (; ox < W; ox++) {
+      const int16_t *pa = t + (size_t)g_bh_i[ox] * 4;
+      const int16_t *w = g_bw[ox];
+      int o[3];
+      for (int c = 0; c < 3; c++) {
+        int s = ((pa[c] * w[0]) >> 16) + ((pa[4 + c] * w[4]) >> 16) + ((pa[8 + c] * w[8]) >> 16) + ((pa[12 + c] * w[12]) >> 16);
+        o[c] = (s + 4) >> 3;
+      }
+      d[ox] = bic_pack(o[0], o[1], o[2]);
+    }
+  }
   return 1;
-}
-
-static inline uint16_t vig_px(uint16_t p, unsigned s, uint32_t m, uint16_t hi) {
-  uint32_t x = ((uint32_t)p | ((uint32_t)p << 16)) & m;
-  x = ((x * s) >> 5) & m;
-  return (uint16_t)((x | (x >> 16)) | (p & hi));
-}
-
-static void vineta_hornear(int W, int H) {
-  g_vig_horneada = 0;
-  if (!g_vineta) return;
-  if (!vineta_tabla(W, H)) return;
-  const uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
-  const uint16_t hi = (g_pf == 0) ? 0x8000 : 0;
-  for (int y = 0; y < H; y++) {
-    uint16_t *d = g_sbuf + (size_t)y * (size_t)W;
-    const uint8_t *t = g_vt + (size_t)y * (size_t)W;
-    int a = g_vt_a[y], b = g_vt_b[y];
-    for (int x = 0; x < a; x++) d[x] = vig_px(d[x], t[x], m, hi);
-    for (int x = b; x < W; x++) d[x] = vig_px(d[x], t[x], m, hi);
-  }
-  g_vig_horneada = 1;
 }
 
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
@@ -1322,8 +1513,19 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   }
   int sw = w, sh = h;
   const uint16_t *src = pre_aplicar(w, h, W, H, &sw, &sh);
+  int bic_hecho = 0;
+  if (g_bic || g_dd) {
+    /* reescalado bicubico (y/o sin puntitos): ocupa el lugar del estirado normal */
+    int escb = (h > 0) ? sh / h : 1;
+    if (escb < 1) escb = 1;
+    int cb0 = cr_t * escb, ncb = cn * escb;
+    if (cb0 + ncb > sh) { cb0 = 0; ncb = sh; }
+    bic_hecho = bic_escalar(src, sw, cb0, ncb, W, H, g_dd);
+  }
   int sv = g_suav;
-  if ((sv || sw != w || g_forzar_W > 0 || fill || g_nitido) && sh <= 1152 && W <= 1920 && H <= 1080) {
+  if (bic_hecho) {
+    /* la imagen ya esta en g_sbuf */
+  } else if ((sv || sw != w || g_forzar_W > 0 || fill || g_nitido) && sh <= 1152 && W <= 1920 && H <= 1080) {
     uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
     int hm = (sv == 2) ? 2 : ((sv || g_nitido || fill) ? 1 : 0);
     int vm = (sv == 2) ? 2 : ((g_nitido || fill) ? 1 : 0);
@@ -1383,7 +1585,6 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   }
   }
   if (g_crt) crt_lineas(W, H);
-  vineta_hornear(W, H);
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
     Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
@@ -1649,7 +1850,7 @@ struct OpsCat {
   int idx[14]; /* indices de g_ml */
 };
 static const OpsCat OPS_CAT[5] = {
-    {"Pantalla", 0, 13, {18, 3, 4, 15, 5, 6, 7, 8, 16, 10, 12, 17, 11, 0}},
+    {"Pantalla", 0, 14, {18, 3, 4, 15, 5, 6, 7, 8, 16, 25, 17, 10, 12, 11}},
     {"Jugabilidad", 1, 4, {0, 1, 2, 22}},
     {"Control", 3, 2, {23, 24}},
     {"Sistema", 4, 3, {9, 14, 13}},
@@ -1663,8 +1864,8 @@ static int ops_n(int c) {
 
 /* Pone tildes y enie en palabras del menu (la letra con acentos solo existe si esta fuente.png) */
 static void acentuar(const char *s, char *out, size_t n) {
-  static const char *de[8] = {"Maxima", "Maximo", "Vineta", "nitido", "Rapida", "menu", "triangulo", "Triangulo"};
-  static const char *a[8] = {"Máxima", "Máximo", "Viñeta", "nítido", "Rápida", "menú", "triángulo", "Triángulo"};
+  static const char *de[8] = {"Maxima", "Maximo", "Bicubico", "nitido", "Rapida", "menu", "triangulo", "Triangulo"};
+  static const char *a[8] = {"Máxima", "Máximo", "Bicúbico", "nítido", "Rápida", "menú", "triángulo", "Triángulo"};
   size_t o = 0;
   while (*s && o + 8 < n) {
     int hecho = 0;
@@ -1778,41 +1979,8 @@ static void dibujar_ops_nuevo(void) {
   SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
 }
 
-static void vineta_crear(void) {
-  g_vig_probada = 1;
-  const int VW = 192, VH = 108;
-  unsigned char *px = (unsigned char *)malloc((size_t)VW * VH * 4);
-  if (!px) return;
-  for (int y = 0; y < VH; y++) {
-    for (int x = 0; x < VW; x++) {
-      float nx = ((x + 0.5f) / VW) * 2.0f - 1.0f;
-      float ny = ((y + 0.5f) / VH) * 2.0f - 1.0f;
-      float d2 = (nx * nx + ny * ny) * 0.5f; /* 0 en el centro, 1 en las esquinas */
-      float a = (d2 - 0.25f) / 0.75f;
-      if (a < 0.0f) a = 0.0f;
-      a = a * a * 0.85f;
-      unsigned char *o = px + ((size_t)y * VW + x) * 4;
-      o[0] = 0; o[1] = 0; o[2] = 0;
-      o[3] = (unsigned char)(a * 255.0f);
-    }
-  }
-  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-  g_tex_vig = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, VW, VH);
-  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
-  if (g_tex_vig) {
-    SDL_UpdateTexture(g_tex_vig, NULL, px, VW * 4);
-    SDL_SetTextureBlendMode(g_tex_vig, SDL_BLENDMODE_BLEND);
-  }
-  free(px);
-  esp("VINETA textura %s", g_tex_vig ? "creada" : "no se pudo crear");
-}
-
-/* Viñeta y brillo encima de la zona donde se dibujo el juego */
+/* Brillo encima de la zona donde se dibujo el juego */
 static void overlay_juego(const SDL_Rect *r) {
-  if (g_vineta && !g_vig_horneada) {
-    if (!g_vig_probada) vineta_crear();
-    if (g_tex_vig) SDL_RenderCopy(R, g_tex_vig, NULL, r);
-  }
   if (g_brillo != 0) {
     if (g_brillo > 0) {
       int v = 16 * g_brillo;
@@ -1829,7 +1997,6 @@ static void overlay_juego(const SDL_Rect *r) {
 
 static void dibujar_juego_interno(void) {
   double t0 = ahora_us();
-  g_vig_horneada = 0;
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
   SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
@@ -1845,7 +2012,6 @@ static void dibujar_juego_interno(void) {
     g_forzar_W = 0;
     g_forzar_H = 0;
     if (pipe_ok && (pW != g_marco_hueco.w || pH != g_marco_hueco.h)) pipe_ok = 0;
-    if (!pipe_ok) g_vig_horneada = 0;
   }
   if ((g_modo == 0 || (marco && !pipe_ok)) && g_sw > 0 && g_sh > 0) {
     int lin = (marco && g_marco_lin) ? 1 : 0;
@@ -2561,7 +2727,8 @@ static void fps_cambiar(void);
 static void calidad_cambiar(int d);
 static void recorte_cambiar(int d);
 static void nitido_cambiar(int d);
-static void vineta_cambiar(int d);
+static void dd_cambiar(int d);
+static void bic_cambiar(int d);
 static void brillo_cambiar(int d);
 static void ajustes_guardar_nombre(const char *nombre);
 static void ajustes_cargar_nombre(const char *nombre);
@@ -2569,9 +2736,9 @@ static void menu_refrescar(void);
 
 /* ---- Opciones antes de entrar al juego (triangulo en el menu de juegos) ---- */
 static int g_pop_vis = 0, g_pop_sel = 0;
-#define POP_N 17
+#define POP_N 18
 /* lineas de menu_refrescar() que valen sin juego cargado (Escala ... Calidad, Continuar) */
-static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19};
+static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 25, 18, 19};
 
 static void pop_ajustar(int idx, int dx) {
   g_msg[0] = 0;
@@ -2590,7 +2757,8 @@ static void pop_ajustar(int idx, int dx) {
     case 14: calidad_cambiar(dx); break;
     case 15: recorte_cambiar(dx); break;
     case 16: nitido_cambiar(dx); break;
-    case 17: vineta_cambiar(dx); break;
+    case 17: dd_cambiar(dx); break;
+    case 25: bic_cambiar(dx); break;
     case 18: brillo_cambiar(dx); break;
     default: break;
   }
@@ -3211,12 +3379,19 @@ static void nitido_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "Escalado nitido cambiado (no aplica con escala Original)");
 }
 
-static void vineta_cambiar(int d) {
+static void dd_cambiar(int d) {
+  g_dd = (g_dd + d + 3) % 3;
+  guardar_num("/data/swan/dedit.txt", g_dd);
+  esp("MENU: sin puntitos = %d", g_dd);
+  snprintf(g_msg, sizeof(g_msg), "%s", g_dd ? "Sin puntitos activado (usa el escalado bicubico)" : "Sin puntitos desactivado");
+}
+
+static void bic_cambiar(int d) {
   (void)d;
-  g_vineta = !g_vineta;
-  guardar_num("/data/swan/vineta.txt", g_vineta);
-  esp("MENU: vineta = %d", g_vineta);
-  snprintf(g_msg, sizeof(g_msg), "Vineta cambiada");
+  g_bic = !g_bic;
+  guardar_num("/data/swan/bic.txt", g_bic);
+  esp("MENU: bicubico = %d", g_bic);
+  snprintf(g_msg, sizeof(g_msg), "Bicubico cambiado (no aplica con escala Original)");
 }
 
 static void brillo_cambiar(int d) {
@@ -3256,8 +3431,8 @@ static void ajustes_guardar_nombre(const char *nombre) {
   FILE *f = fopen(ruta, "wb");
   if (!f) return;
   int marco = g_marco_on ? g_marco_idx : g_nmarcos;
-  fprintf(f, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit, g_s2x ? 1 : 0,
-          g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco, g_vineta ? 1 : 0, g_brillo + 2);
+  fprintf(f, "ajustes3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit, g_s2x ? 1 : 0,
+          g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco, g_dd, g_bic ? 1 : 0, g_brillo + 2);
   fclose(f);
   esp("AJUSTES: guardados para %s", id);
 }
@@ -3273,18 +3448,27 @@ static void ajustes_cargar_nombre(const char *nombre) {
   linea[0] = 0;
   if (!fgets(linea, sizeof(linea), f)) linea[0] = 0;
   fclose(f);
-  int v[14] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, g_vineta ? 1 : 0, g_brillo + 2};
-  int n = sscanf(linea, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7],
-                 &v[8], &v[9], &v[10], &v[11], &v[12], &v[13]);
-  if (n != 14) {
-    v[12] = g_vineta ? 1 : 0;
-    v[13] = g_brillo + 2;
-    n = sscanf(linea, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8],
-               &v[9], &v[10], &v[11]);
-    if (n == 12) n = 14;
+  int v[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, g_dd, g_bic ? 1 : 0, g_brillo + 2};
+  int n = sscanf(linea, "ajustes3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
+                 &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
+  if (n != 15) {
+    int ant = 0; /* en ajustes2 este campo era la vineta (ya no existe) */
+    v[12] = g_dd;
+    v[13] = g_bic ? 1 : 0;
+    v[14] = g_brillo + 2;
+    n = sscanf(linea, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7],
+               &v[8], &v[9], &v[10], &v[11], &ant, &v[14]);
+    if (n == 14) {
+      n = 15;
+    } else {
+      v[14] = g_brillo + 2;
+      n = sscanf(linea, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8],
+                 &v[9], &v[10], &v[11]);
+      if (n == 12) n = 15;
+    }
   }
-  if (n != 14 || v[13] < 0 || v[13] > 4 || v[0] < 0 || v[0] > 3 || v[2] < 0 || v[2] > 2 || v[3] < 0 || v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 ||
-      v[6] > 2 || v[7] < 0 || v[7] > 4) {
+  if (n != 15 || v[14] < 0 || v[14] > 4 || v[12] < 0 || v[12] > 2 || v[13] < 0 || v[13] > 1 || v[0] < 0 || v[0] > 3 || v[2] < 0 ||
+      v[2] > 2 || v[3] < 0 || v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 || v[6] > 2 || v[7] < 0 || v[7] > 4) {
     esp("AJUSTES: archivo de %s no valido", id);
     return;
   }
@@ -3299,17 +3483,18 @@ static void ajustes_cargar_nombre(const char *nombre) {
   g_fps_on = v[8] ? 1 : 0;
   g_recorte = v[9] ? 1 : 0;
   g_nitido = v[10] ? 1 : 0;
-  g_vineta = v[12] ? 1 : 0;
-  g_brillo = v[13] - 2;
+  g_dd = v[12];
+  g_bic = v[13] ? 1 : 0;
+  g_brillo = v[14] - 2;
   marco_fijar(v[11]);
   esp("AJUSTES: cargados para %s", id);
 }
 
 /* Calidad: 0 Mejor, 1 Equilibrada, 2 Rapida. Devuelve -1 si los ajustes no coinciden con ninguna */
 static int calidad_actual(void) {
-  if (g_suav == 2 && g_aa == 1 && g_nit == 1 && g_s2x == 0 && g_color == 1) return 0;
-  if (g_suav == 1 && g_aa == 1 && g_nit == 0 && g_s2x == 0 && g_color == 1) return 1;
-  if (g_suav == 0 && g_aa == 0 && g_nit == 0 && g_s2x == 0 && g_color == 0) return 2;
+  if (g_suav == 2 && g_aa == 1 && g_nit == 1 && g_s2x == 0 && g_color == 1 && g_bic == 1 && g_dd == 1) return 0;
+  if (g_suav == 1 && g_aa == 1 && g_nit == 0 && g_s2x == 0 && g_color == 1 && g_bic == 0 && g_dd == 0) return 1;
+  if (g_suav == 0 && g_aa == 0 && g_nit == 0 && g_s2x == 0 && g_color == 0 && g_bic == 0 && g_dd == 0) return 2;
   return -1;
 }
 
@@ -3317,14 +3502,16 @@ static void calidad_cambiar(int d) {
   int q = calidad_actual();
   if (q < 0) q = (d > 0) ? 2 : 0;
   q = (q + d + 3) % 3;
-  if (q == 0) { g_suav = 2; g_aa = 1; g_nit = 1; g_s2x = 0; g_color = 1; }
-  else if (q == 1) { g_suav = 1; g_aa = 1; g_nit = 0; g_s2x = 0; g_color = 1; }
-  else { g_suav = 0; g_aa = 0; g_nit = 0; g_s2x = 0; g_color = 0; }
+  if (q == 0) { g_suav = 2; g_aa = 1; g_nit = 1; g_s2x = 0; g_color = 1; g_bic = 1; g_dd = 1; }
+  else if (q == 1) { g_suav = 1; g_aa = 1; g_nit = 0; g_s2x = 0; g_color = 1; g_bic = 0; g_dd = 0; }
+  else { g_suav = 0; g_aa = 0; g_nit = 0; g_s2x = 0; g_color = 0; g_bic = 0; g_dd = 0; }
   guardar_num("/data/swan/suav.txt", g_suav);
   guardar_num("/data/swan/aa.txt", g_aa);
   guardar_num("/data/swan/nit.txt", g_nit);
   guardar_num("/data/swan/s2x.txt", g_s2x);
   guardar_num("/data/swan/color.txt", g_color);
+  guardar_num("/data/swan/bic.txt", g_bic);
+  guardar_num("/data/swan/dedit.txt", g_dd);
   esp("MENU: calidad = %d", q);
   snprintf(g_msg, sizeof(g_msg), "Calidad cambiada (no aplica con escala Original)");
 }
@@ -3391,7 +3578,11 @@ static void menu_refrescar(void) {
   }
   snprintf(g_ml[15], sizeof(g_ml[15]), "Recorte auto: %s  (solo Maxima)", g_recorte ? "Si" : "No");
   snprintf(g_ml[16], sizeof(g_ml[16]), "Escalado nitido: %s", g_nitido ? "Si" : "No");
-  snprintf(g_ml[17], sizeof(g_ml[17]), "Vineta: %s  (izq/der)", g_vineta ? "Si" : "No");
+  {
+    const char *dn_[3] = {"No", "Suave", "Fuerte"};
+    snprintf(g_ml[17], sizeof(g_ml[17]), "Sin puntitos: %s  (izq/der)", dn_[g_dd % 3]);
+  }
+  snprintf(g_ml[25], sizeof(g_ml[25]), "Bicubico: %s", g_bic ? "Si" : "No");
   snprintf(g_ml[18], sizeof(g_ml[18]), "Brillo: %+d  (izq/der)", g_brillo);
   snprintf(g_ml[23], sizeof(g_ml[23]), "Jugador 1: %s", g_pad >= 0 ? "conectado" : "no");
   snprintf(g_ml[24], sizeof(g_ml[24]), "Jugador 2: %s", g_pad2 >= 0 ? "conectado" : "no");
@@ -3480,7 +3671,8 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 14) calidad_cambiar(dx);
       else if (g_menu_sel == 15) recorte_cambiar(dx);
       else if (g_menu_sel == 16) nitido_cambiar(dx);
-      else if (g_menu_sel == 17) vineta_cambiar(dx);
+      else if (g_menu_sel == 17) dd_cambiar(dx);
+      else if (g_menu_sel == 25) bic_cambiar(dx);
       else if (g_menu_sel == 18) brillo_cambiar(dx);
       else if (g_menu_sel == 22) disco_cambiar(dx);
     }
@@ -3508,7 +3700,8 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 14) calidad_cambiar(1);
       else if (g_menu_sel == 15) recorte_cambiar(1);
       else if (g_menu_sel == 16) nitido_cambiar(1);
-      else if (g_menu_sel == 17) vineta_cambiar(1);
+      else if (g_menu_sel == 17) dd_cambiar(1);
+      else if (g_menu_sel == 25) bic_cambiar(1);
       else if (g_menu_sel == 18) brillo_cambiar(1);
       else if (g_menu_sel == 19) salir = 1;
       else if (g_menu_sel == 22) disco_cambiar(1);
@@ -3857,11 +4050,17 @@ inicio_menu:;
         fclose(fnt);
         if (c == '0' || c == '1') g_nitido = c - '0';
       }
-      FILE *fv = fopen("/data/swan/vineta.txt", "rb");
-      if (fv) {
-        int c = fgetc(fv);
-        fclose(fv);
-        if (c == '0' || c == '1') g_vineta = c - '0';
+      FILE *fdd = fopen("/data/swan/dedit.txt", "rb");
+      if (fdd) {
+        int c = fgetc(fdd);
+        fclose(fdd);
+        if (c >= '0' && c <= '2') g_dd = c - '0';
+      }
+      FILE *fbc = fopen("/data/swan/bic.txt", "rb");
+      if (fbc) {
+        int c = fgetc(fbc);
+        fclose(fbc);
+        if (c == '0' || c == '1') g_bic = c - '0';
       }
       FILE *fb = fopen("/data/swan/brillo.txt", "rb");
       if (fb) {
@@ -3869,7 +4068,7 @@ inicio_menu:;
         fclose(fb);
         if (c >= '0' && c <= '4') g_brillo = c - '0' - 2;
       }
-      esp("RECORTE inicial=%d nitido=%d vineta=%d brillo=%d", g_recorte, g_nitido, g_vineta, g_brillo);
+      esp("RECORTE inicial=%d nitido=%d sinpuntitos=%d bicubico=%d brillo=%d", g_recorte, g_nitido, g_dd, g_bic, g_brillo);
     }
     ajustes_cargar_nombre(g_juego_id); /* ajustes propios de este juego, si los hay */
   }
