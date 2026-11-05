@@ -1199,6 +1199,72 @@ static void recorte_actualizar(int w, int h) {
   if (g_cr_t != t0 || g_cr_b != b0) esp("RECORTE: %dx%d filas negras arriba=%d abajo=%d", w, h, g_cr_t, g_cr_b);
 }
 
+/* Vineta "horneada": se multiplica directo en el buffer ya escalado (rapido, sin mezcla de SDL).
+   La tabla (0..32 por pixel) se calcula una sola vez por tamano. */
+static uint8_t *g_vt = NULL;
+static int g_vt_W = 0, g_vt_H = 0;
+static short g_vt_a[1100], g_vt_b[1100]; /* por fila: zona central sin oscurecer [a, b) */
+static int g_vig_horneada = 0;
+
+static int vineta_tabla(int W, int H) {
+  if (g_vt && g_vt_W == W && g_vt_H == H) return 1;
+  if (W < 1 || H < 1 || W > 1920 || H > 1100) return 0;
+  uint8_t *t = (uint8_t *)realloc(g_vt, (size_t)W * (size_t)H);
+  if (!t) return 0;
+  g_vt = t;
+  g_vt_W = 0;
+  g_vt_H = 0;
+  static float nx2[1920];
+  for (int x = 0; x < W; x++) {
+    float nx = ((x + 0.5f) / W) * 2.0f - 1.0f;
+    nx2[x] = nx * nx;
+  }
+  for (int y = 0; y < H; y++) {
+    float ny = ((y + 0.5f) / H) * 2.0f - 1.0f;
+    float ny2 = ny * ny;
+    uint8_t *row = g_vt + (size_t)y * (size_t)W;
+    int f = -1, l = -1;
+    for (int x = 0; x < W; x++) {
+      float d2 = (nx2[x] + ny2) * 0.5f; /* 0 en el centro, 1 en las esquinas */
+      float a = (d2 - 0.25f) / 0.75f;
+      if (a < 0.0f) a = 0.0f;
+      a = a * a * 0.85f;
+      int v = (int)((1.0f - a) * 32.0f + 0.5f);
+      if (v > 32) v = 32;
+      if (v < 0) v = 0;
+      row[x] = (uint8_t)v;
+      if (v == 32) { if (f < 0) f = x; l = x; }
+    }
+    if (f < 0) { g_vt_a[y] = (short)W; g_vt_b[y] = (short)W; }
+    else { g_vt_a[y] = (short)f; g_vt_b[y] = (short)(l + 1); }
+  }
+  g_vt_W = W;
+  g_vt_H = H;
+  return 1;
+}
+
+static inline uint16_t vig_px(uint16_t p, unsigned s, uint32_t m, uint16_t hi) {
+  uint32_t x = ((uint32_t)p | ((uint32_t)p << 16)) & m;
+  x = ((x * s) >> 5) & m;
+  return (uint16_t)((x | (x >> 16)) | (p & hi));
+}
+
+static void vineta_hornear(int W, int H) {
+  g_vig_horneada = 0;
+  if (!g_vineta) return;
+  if (!vineta_tabla(W, H)) return;
+  const uint32_t m = (g_pf == 0) ? 0x03E07C1Fu : 0x07E0F81Fu;
+  const uint16_t hi = (g_pf == 0) ? 0x8000 : 0;
+  for (int y = 0; y < H; y++) {
+    uint16_t *d = g_sbuf + (size_t)y * (size_t)W;
+    const uint8_t *t = g_vt + (size_t)y * (size_t)W;
+    int a = g_vt_a[y], b = g_vt_b[y];
+    for (int x = 0; x < a; x++) d[x] = vig_px(d[x], t[x], m, hi);
+    for (int x = b; x < W; x++) d[x] = vig_px(d[x], t[x], m, hi);
+  }
+  g_vig_horneada = 1;
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 static int escalar_propio(int kpedido, int *ow, int *oh) {
@@ -1317,6 +1383,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   }
   }
   if (g_crt) crt_lineas(W, H);
+  vineta_hornear(W, H);
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
     Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
@@ -1742,7 +1809,7 @@ static void vineta_crear(void) {
 
 /* Viñeta y brillo encima de la zona donde se dibujo el juego */
 static void overlay_juego(const SDL_Rect *r) {
-  if (g_vineta) {
+  if (g_vineta && !g_vig_horneada) {
     if (!g_vig_probada) vineta_crear();
     if (g_tex_vig) SDL_RenderCopy(R, g_tex_vig, NULL, r);
   }
@@ -1762,6 +1829,7 @@ static void overlay_juego(const SDL_Rect *r) {
 
 static void dibujar_juego_interno(void) {
   double t0 = ahora_us();
+  g_vig_horneada = 0;
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
   SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
@@ -1777,6 +1845,7 @@ static void dibujar_juego_interno(void) {
     g_forzar_W = 0;
     g_forzar_H = 0;
     if (pipe_ok && (pW != g_marco_hueco.w || pH != g_marco_hueco.h)) pipe_ok = 0;
+    if (!pipe_ok) g_vig_horneada = 0;
   }
   if ((g_modo == 0 || (marco && !pipe_ok)) && g_sw > 0 && g_sh > 0) {
     int lin = (marco && g_marco_lin) ? 1 : 0;
@@ -3336,13 +3405,16 @@ static void menu_refrescar(void) {
   }
 }
 
-static void menu_pedir_dibujo(void) {
+static int menu_pedir_dibujo(void) {
   if (g_dib_hilo) {
-    if (__atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 0)
+    if (__atomic_load_n(&g_dib_estado, __ATOMIC_ACQUIRE) == 0) {
       __atomic_store_n(&g_dib_estado, 1, __ATOMIC_RELEASE);
-  } else {
-    dibujar_juego();
+      return 1;
+    }
+    return 0;
   }
+  dibujar_juego();
+  return 1;
 }
 
 /* El juego queda en pausa (no se llama a retro_run) mientras el menu esta abierto */
@@ -3368,6 +3440,8 @@ static void pausa_menu(void) {
   int conf = 0;
   int ct = 0; /* 1 = ya se pulso triangulo una vez (pide confirmar) */
   int sel_prev = g_menu_sel;
+  unsigned t_dib = 0;
+  int dib_pend = 1;
   for (;;) {
     poll();
     if (g_menu_toggle) { g_menu_toggle = 0; break; }
@@ -3450,8 +3524,16 @@ static void pausa_menu(void) {
     menu_refrescar();
     if (salir) break;
     SDL_PumpEvents();
-    menu_pedir_dibujo();
-    SDL_Delay(30);
+    /* solo se redibuja cuando se pulsa algo (o cada 250 ms por seguridad): asi el hilo de dibujo
+       esta libre cuando llega una pulsacion y el menu responde al instante */
+    {
+      unsigned tn = SDL_GetTicks();
+      if (nw || dib_pend || tn - t_dib > 250) {
+        dib_pend = menu_pedir_dibujo() ? 0 : 1;
+        t_dib = tn;
+      }
+    }
+    SDL_Delay(16);
   }
   g_menu_vis = 0;
   ajustes_guardar_nombre(g_juego_id);
