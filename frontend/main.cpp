@@ -211,6 +211,7 @@ static uint16_t g_sbuf[1920 * 1080];
 
 /* copia del ultimo cuadro, para dibujarlo en otro hilo */
 static uint16_t g_snap[1920 * 1080];
+static unsigned g_snap_ver = 0; /* sube cada vez que cambia el cuadro guardado */
 static unsigned g_sw = 0, g_sh = 0;
 static int g_dib_estado = 0; /* 0 libre, 1 cuadro listo, 2 dibujando */
 static int g_dib_hilo = 0;
@@ -240,8 +241,10 @@ static struct { short y, h, l, r; } g_bandas[MARCO_MAX_BANDAS]; /* zonas del mar
 static int g_nbandas = 0;
 #define MARCO_MAX 5  /* marco.png, marco2.png ... marco5.png (solo uno en memoria a la vez) */
 static int g_nmarcos = 0, g_marco_idx = 0;
-static int g_crt = 0; /* efecto CRT (lineas de escaneo): 0 No, 1 Suave, 2 Fuerte */
+static int g_crt = 0; /* efecto CRT: 0 No, 1 Suave, 2 Fuerte, 3 Trinitron (lineas + mascara de fosforo) */
 static int g_color = 0;           /* filtro de color: 0 Original, 1 Natural, 2 Vivido, 3 Calido, 4 Retro */
+static int g_cont = 0, g_sat = 0, g_gam = 0; /* ajustes finos de color, -2 .. +2 */
+static int g_resp = 0;            /* resplandor de las zonas claras: 0 No, 1 Suave, 2 Fuerte */
 static uint16_t g_lut[65536];     /* tabla de color para pixeles de 16 bits */
 static int g_lut_listo = -1;      /* filtro para el que esta calculada g_lut */
 static int g_lut_pf = -1;         /* formato de pixel para el que esta calculada */
@@ -262,7 +265,7 @@ static volatile int g_menu_vis = 0;
 static SDL_Texture *g_fondo_pop = NULL; /* /data/swan/fondo_popup.png: marco del popup de opciones en el menu de juegos */
 static SDL_Texture *g_fondo_opc = NULL; /* /data/swan/fondo_opciones.png: diseno del menu de opciones dentro del juego */
 static int g_menu_sel = 0, g_menu_n = 0;
-static char g_ml[28][72];
+static char g_ml[32][72];
 static char g_msg[80] = "";
 static int g_jit_pedido = 0; /* 1 si existe /data/swan/jit.txt (se aplica al reiniciar la app) */
 static int g_ranura = 1;
@@ -484,6 +487,10 @@ static bool entorno(unsigned cmd, void *data) {
       }
       if (contiene(v->key, "GPU_Renderer")) {
         v->value = "Software";
+        return true;
+      }
+      if (contiene(v->key, "DisableInterlacing")) {
+        v->value = "true"; /* imagen progresiva: sin lineas que tiemblan en los juegos a 480i */
         return true;
       }
       if (contiene(v->key, "GPU_UseThread")) {
@@ -1142,7 +1149,29 @@ static const uint16_t *pre_aplicar(int w, int h, int W, int H, int *sw, int *sh)
   return aa_aplicar(w, h, W, H, g_aa, g_nit);
 }
 
-/* Efecto CRT: oscurece una de cada 3 filas (lineas de escaneo). Funciona sobre el buffer de 16 bits */
+/* Mascara de fosforo (tipo Trinitron): en columnas alternas de 3 en 3 se atenuan 2 de los 3 colores */
+static void crt_mascara(int W, int H) {
+  uint16_t mr, mg, mb;
+  if (g_pf == 2) { mr = 0x3800; mg = 0x01E0; mb = 0x0007; }
+  else { mr = 0x1C00; mg = 0x00E0; mb = 0x0007; }
+  const uint16_t m0 = (uint16_t)(mg | mb), m1 = (uint16_t)(mr | mb), m2 = (uint16_t)(mr | mg);
+  for (int y = 0; y < H; y++) {
+    uint16_t *d = g_sbuf + (size_t)y * (size_t)W;
+    int x = 0;
+    for (; x + 2 < W; x += 3) {
+      d[x] = (uint16_t)(d[x] - ((d[x] >> 2) & m0));
+      d[x + 1] = (uint16_t)(d[x + 1] - ((d[x + 1] >> 2) & m1));
+      d[x + 2] = (uint16_t)(d[x + 2] - ((d[x + 2] >> 2) & m2));
+    }
+    for (; x < W; x++) {
+      uint16_t mk = (x % 3 == 0) ? m0 : ((x % 3 == 1) ? m1 : m2);
+      d[x] = (uint16_t)(d[x] - ((d[x] >> 2) & mk));
+    }
+  }
+}
+
+/* Efecto CRT: oscurece una de cada 3 filas (lineas de escaneo). Funciona sobre el buffer de 16 bits.
+   El modo Trinitron usa las lineas suaves y ademas la mascara de fosforo. */
 static void crt_lineas(int W, int H) {
   int fuerte = (g_crt == 2);
   for (int y = 2; y < H; y += 3) {
@@ -1155,6 +1184,7 @@ static void crt_lineas(int W, int H) {
       else for (int x = 0; x < W; x++) d[x] = (uint16_t)(d[x] - ((d[x] >> 2) & 0x1CE7));
     }
   }
+  if (g_crt == 3) crt_mascara(W, H);
 }
 
 /* Una fila es negra si todos los pixeles muestreados tienen muy poco brillo */
@@ -1209,7 +1239,7 @@ static int g_dd = 0;  /* sin puntitos (dithering): 0 No, 1 Suave, 2 Fuerte */
 
 #define BIC_MAXPIX (640 * 512)
 #define BIC_MAXW 1024
-static int16_t *g_bx_a = NULL, *g_bx_b = NULL, *g_bx_t = NULL;
+static int16_t *g_bx_a = NULL, *g_bx_b = NULL, *g_bx_c = NULL, *g_bx_t = NULL;
 static int16_t g_bw[1920][16]; /* pesos horizontales: 4 taps x 4 canales por pixel de salida */
 static int g_bh_i[1920];       /* primer tap (indice de pixel en g_bx_t) */
 static int g_bh_n = 0, g_bh_N = 0;
@@ -1338,6 +1368,50 @@ static void bic_dedither(const int16_t *src, int16_t *dst, int sw, int nch, int 
   }
 }
 
+/* Resplandor: las zonas muy claras "sangran" un poco hacia los lados, como en un monitor CRT.
+   Se calcula con la imagen chica (antes de estirarla), asi que casi no cuesta. Se toma la parte de la
+   imagen que pasa de un umbral, se desenfoca (triangular separable de 5 puntos) y se suma. Modifica E en el sitio. */
+static void bic_resplandor(int16_t *E, int sw, int nch, int nivel) {
+  int16_t *C = g_bx_c;
+  const int umbral = 2400;                    /* ~150 de 255, en escala x16 */
+  const int fuerza = (nivel >= 2) ? 300 : 170; /* sobre 256 */
+  for (int y = 0; y < nch; y++) {
+    const int16_t *r = E + (size_t)y * (size_t)sw * 4;
+    int16_t *c = C + (size_t)y * (size_t)sw * 4;
+    for (int x = 0; x < sw; x++) {
+      int x0 = x > 1 ? x - 2 : 0, x1 = x > 0 ? x - 1 : 0, x3 = x < sw - 1 ? x + 1 : sw - 1, x4 = x < sw - 2 ? x + 2 : sw - 1;
+      for (int ch = 0; ch < 3; ch++) {
+        int a0 = r[x0 * 4 + ch] - umbral, a1 = r[x1 * 4 + ch] - umbral, a2 = r[x * 4 + ch] - umbral;
+        int a3 = r[x3 * 4 + ch] - umbral, a4 = r[x4 * 4 + ch] - umbral;
+        if (a0 < 0) a0 = 0;
+        if (a1 < 0) a1 = 0;
+        if (a2 < 0) a2 = 0;
+        if (a3 < 0) a3 = 0;
+        if (a4 < 0) a4 = 0;
+        int sum = a0 + 2 * a1 + 3 * a2 + 2 * a3 + a4;
+        c[x * 4 + ch] = (int16_t)((sum * 7282 + 32768) >> 16); /* /9 */
+      }
+    }
+  }
+  for (int y = 0; y < nch; y++) {
+    int y0 = y > 1 ? y - 2 : 0, y1 = y > 0 ? y - 1 : 0, y3 = y < nch - 1 ? y + 1 : nch - 1, y4 = y < nch - 2 ? y + 2 : nch - 1;
+    const int16_t *c0 = C + (size_t)y0 * (size_t)sw * 4, *c1 = C + (size_t)y1 * (size_t)sw * 4, *c2 = C + (size_t)y * (size_t)sw * 4;
+    const int16_t *c3 = C + (size_t)y3 * (size_t)sw * 4, *c4 = C + (size_t)y4 * (size_t)sw * 4;
+    int16_t *e = E + (size_t)y * (size_t)sw * 4;
+    for (int x = 0; x < sw; x++) {
+      for (int ch = 0; ch < 3; ch++) {
+        int i = x * 4 + ch;
+        int sum = c0[i] + 2 * c1[i] + 3 * c2[i] + 2 * c3[i] + c4[i];
+        int b = (sum * 7282 + 32768) >> 16;
+        if (b > 0) {
+          int v = e[i] + ((b * fuerza) >> 8);
+          e[i] = (int16_t)(v > 4080 ? 4080 : v);
+        }
+      }
+    }
+  }
+}
+
 static inline uint16_t bic_pack(int r, int g, int b) {
   if (r < 0) r = 0; if (r > 255) r = 255;
   if (g < 0) g = 0; if (g > 255) g = 255;
@@ -1347,26 +1421,28 @@ static inline uint16_t bic_pack(int r, int g, int b) {
 }
 
 /* src: imagen sw x (filas de origen); se usan nch filas desde cr0. Escribe W x H en g_sbuf. 1 = hecho */
-static int bic_escalar(const uint16_t *src, int sw, int cr0, int nch, int W, int H, int dd) {
+static int bic_escalar(const uint16_t *src, int sw, int cr0, int nch, int W, int H, int dd, int resp = 0) {
   if (sw < 8 || nch < 8 || sw > BIC_MAXW || (size_t)sw * (size_t)nch > (size_t)BIC_MAXPIX) return 0;
   if (W < 2 || H < 2 || W > 1920 || H > 1080) return 0;
-  if (!g_bx_a || !g_bx_b || !g_bx_t) {
-    free(g_bx_a); free(g_bx_b); free(g_bx_t);
+  if (!g_bx_a || !g_bx_b || !g_bx_c || !g_bx_t) {
+    free(g_bx_a); free(g_bx_b); free(g_bx_c); free(g_bx_t);
     g_bx_a = (int16_t *)malloc(((size_t)BIC_MAXPIX + 16) * 8);
     g_bx_b = (int16_t *)malloc(((size_t)BIC_MAXPIX + 16) * 8);
+    g_bx_c = (int16_t *)malloc(((size_t)BIC_MAXPIX + 16) * 8);
     g_bx_t = (int16_t *)malloc(((size_t)BIC_MAXW + 16) * 8);
-    if (!g_bx_a || !g_bx_b || !g_bx_t) {
-      free(g_bx_a); free(g_bx_b); free(g_bx_t);
-      g_bx_a = g_bx_b = g_bx_t = NULL;
+    if (!g_bx_a || !g_bx_b || !g_bx_c || !g_bx_t) {
+      free(g_bx_a); free(g_bx_b); free(g_bx_c); free(g_bx_t);
+      g_bx_a = g_bx_b = g_bx_c = g_bx_t = NULL;
       return 0;
     }
   }
   bic_expandir(src, sw, cr0, nch, g_bx_a);
-  const int16_t *E = g_bx_a;
+  int16_t *E = g_bx_a;
   if (dd > 0) {
     bic_dedither(g_bx_a, g_bx_b, sw, nch, dd);
     E = g_bx_b;
   }
+  if (resp > 0) bic_resplandor(E, sw, nch, resp);
   bic_tablas(sw, nch, W, H);
   const int nv = sw * 4;
   int16_t *t = g_bx_t;
@@ -1458,6 +1534,10 @@ static int bic_escalar(const uint16_t *src, int sw, int cr0, int nch, int W, int
 
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
+/* Guarda la imagen ya escalada: si nada cambio (por ejemplo con el menu abierto y el juego en pausa) no se repite el trabajo */
+static int g_ec_key[24];
+static int g_ec_ok = 0;
+
 static int escalar_propio(int kpedido, int *ow, int *oh) {
   if (g_sw == 0 || g_sh == 0) return 0;
   if (g_pf != 2 && g_pf != 0) return 0;
@@ -1511,16 +1591,27 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
       g_kreal = 1;
     }
   }
+  {
+    int key[24] = {(int)g_snap_ver, w, h, W, H, cr_t, cn, fill, g_suav, g_nitido ? 1 : 0, g_aa, g_nit, g_s2x ? 1 : 0, g_crt,
+                   g_bic ? 1 : 0, g_dd, g_resp, g_pf, g_forzar_W, g_forzar_H, g_modo, g_asp ? 1 : 0, 0, 0};
+    if (g_ec_ok && g_tex2 && g_t2w == W && g_t2h == H && memcmp(key, g_ec_key, sizeof(key)) == 0) {
+      *ow = W;
+      *oh = H;
+      return 1;
+    }
+    memcpy(g_ec_key, key, sizeof(key));
+    g_ec_ok = 0; /* g_sbuf va a cambiar: hasta terminar no vale */
+  }
   int sw = w, sh = h;
   const uint16_t *src = pre_aplicar(w, h, W, H, &sw, &sh);
   int bic_hecho = 0;
-  if (g_bic || g_dd) {
-    /* reescalado bicubico (y/o sin puntitos): ocupa el lugar del estirado normal */
+  if (g_bic || g_dd || g_resp) {
+    /* reescalado bicubico (y/o sin puntitos, resplandor): ocupa el lugar del estirado normal */
     int escb = (h > 0) ? sh / h : 1;
     if (escb < 1) escb = 1;
     int cb0 = cr_t * escb, ncb = cn * escb;
     if (cb0 + ncb > sh) { cb0 = 0; ncb = sh; }
-    bic_hecho = bic_escalar(src, sw, cb0, ncb, W, H, g_dd);
+    bic_hecho = bic_escalar(src, sw, cb0, ncb, W, H, g_dd, g_resp);
   }
   int sv = g_suav;
   if (bic_hecho) {
@@ -1595,6 +1686,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   }
   if (!g_tex2) return 0;
   SDL_UpdateTexture(g_tex2, NULL, g_sbuf, W * 2);
+  g_ec_ok = 1;
   *ow = W;
   *oh = H;
   return 1;
@@ -1849,8 +1941,9 @@ struct OpsCat {
   int n;
   int idx[14]; /* indices de g_ml */
 };
-static const OpsCat OPS_CAT[5] = {
-    {"Pantalla", 0, 14, {18, 3, 4, 15, 5, 6, 7, 8, 16, 25, 17, 10, 12, 11}},
+static const OpsCat OPS_CAT[6] = {
+    {"Pantalla", 0, 11, {3, 4, 15, 5, 6, 7, 8, 16, 25, 17, 11}},
+    {"Imagen", 2, 7, {18, 12, 26, 27, 28, 10, 29}},
     {"Jugabilidad", 1, 4, {0, 1, 2, 22}},
     {"Control", 3, 2, {23, 24}},
     {"Sistema", 4, 3, {9, 14, 13}},
@@ -1858,18 +1951,18 @@ static const OpsCat OPS_CAT[5] = {
 };
 static int ops_n(int c) {
   int n = OPS_CAT[c].n;
-  if (c == 1 && disco_total() <= 1) n = 3; /* "Disco" solo si el juego tiene varios discos */
+  if (c == 2 && disco_total() <= 1) n = 3; /* "Disco" solo si el juego tiene varios discos */
   return n;
 }
 
 /* Pone tildes y enie en palabras del menu (la letra con acentos solo existe si esta fuente.png) */
 static void acentuar(const char *s, char *out, size_t n) {
-  static const char *de[8] = {"Maxima", "Maximo", "Bicubico", "nitido", "Rapida", "menu", "triangulo", "Triangulo"};
-  static const char *a[8] = {"Máxima", "Máximo", "Bicúbico", "nítido", "Rápida", "menú", "triángulo", "Triángulo"};
+  static const char *de[9] = {"Maxima", "Maximo", "Bicubico", "nitido", "Rapida", "menu", "triangulo", "Triangulo", "Saturacion"};
+  static const char *a[9] = {"Máxima", "Máximo", "Bicúbico", "nítido", "Rápida", "menú", "triángulo", "Triángulo", "Saturación"};
   size_t o = 0;
   while (*s && o + 8 < n) {
     int hecho = 0;
-    for (int i = 0; i < 8 && !hecho; i++) {
+    for (int i = 0; i < 9 && !hecho; i++) {
       size_t L = strlen(de[i]);
       if (!strncmp(s, de[i], L)) {
         size_t La = strlen(a[i]);
@@ -1907,7 +2000,7 @@ static void dibujar_ops_nuevo(void) {
   ops_fill(0, 0, 1920, 1080); /* el juego queda de fondo, oscurecido */
   SDL_RenderCopy(R, g_ops_fondo, NULL, NULL);
   int cat = g_ops_cat;
-  if (cat < 0 || cat > 4) cat = 0;
+  if (cat < 0 || cat > 5) cat = 0;
   /* barra de la seccion elegida */
   {
     int cy = 218 + cat * 88;
@@ -1917,7 +2010,7 @@ static void dibujar_ops_nuevo(void) {
     ops_fill(143, cy - 46, 374, 3);
     ops_fill(143, cy + 43, 374, 3);
   }
-  for (int c = 0; c < 5; c++) {
+  for (int c = 0; c < 6; c++) {
     int cy = 218 + c * 88;
     SDL_Rect sr = {0, OPS_CAT[c].icono * 96, 96, 96};
     SDL_Rect dr = {160, cy - 48, 96, 96};
@@ -1953,18 +2046,19 @@ static void dibujar_ops_nuevo(void) {
     } else {
       snprintf(etiqueta, sizeof(etiqueta), "%s", txt);
     }
-    if (idx == 18) snprintf(valor, sizeof(valor), "%+d", g_brillo); /* el brillo lleva barra */
+    int bar_v = (idx == 18) ? g_brillo : (idx == 26) ? g_cont : (idx == 27) ? g_sat : (idx == 28) ? g_gam : 99;
+    if (bar_v != 99) snprintf(valor, sizeof(valor), "%+d", bar_v); /* brillo, contraste, saturacion y gamma llevan barra */
     int cr = sel ? 255 : 222, cg = sel ? 232 : 222, cb = sel ? 130 : 240;
     texto_col(579.0f, (float)(cy - 10), 3, cr, cg, cb, etiqueta);
     if (valor[0]) texto_col(982.0f, (float)(cy - 10), 3, cr, cg, cb, valor);
-    if (idx == 18) {
+    if (bar_v != 99) {
       SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_NONE);
       SDL_SetRenderDrawColor(R, 235, 235, 250, 255);
       ops_fill(1076, cy - 10, 292, 22);
       SDL_SetRenderDrawColor(R, 24, 22, 52, 255);
       ops_fill(1079, cy - 7, 286, 16);
       SDL_SetRenderDrawColor(R, 150, 120, 245, 255);
-      ops_fill(1079, cy - 7, 286 * (g_brillo + 2) / 4, 16);
+      ops_fill(1079, cy - 7, 286 * (bar_v + 2) / 4, 16);
       SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
     }
   }
@@ -2210,6 +2304,10 @@ static void paso(const char *s) {
   esperar(60);
 }
 
+/* clave del filtro de color completo (filtro + ajustes finos); +1 para que nunca valga 0 */
+static int color_clave(void) { return 1 + g_color + 8 * (g_cont + 2) + 64 * (g_sat + 2) + 512 * (g_gam + 2); }
+static int color_activo(void) { return g_color || g_cont || g_sat || g_gam; }
+
 static float color_lim(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
 /* Calcula g_lut para el filtro g_color y el formato de pixel g_pf (sin libm: solo sumas y productos) */
@@ -2222,6 +2320,10 @@ static void color_construir(void) {
     case 4: sat = 0.82f; con = 0.10f; rm = 1.05f; bm = 0.92f; lift = 0.03f; break;       /* retro */
     default: break;
   }
+  /* ajustes finos del usuario (menu Imagen) */
+  sat *= 1.0f + 0.15f * (float)g_sat;
+  con += 0.12f * (float)g_cont;
+  const float gam = 0.18f * (float)g_gam; /* medios tonos: + aclara, - oscurece */
   int pf = g_pf;
   for (int v = 0; v < 65536; v++) {
     float fr, fg, fb;
@@ -2241,6 +2343,12 @@ static void color_construir(void) {
     fr = fr + con * (fr * fr * (3.0f - 2.0f * fr) - fr);
     fg = fg + con * (fg * fg * (3.0f - 2.0f * fg) - fg);
     fb = fb + con * (fb * fb * (3.0f - 2.0f * fb) - fb);
+    fr = color_lim(fr);
+    fg = color_lim(fg);
+    fb = color_lim(fb);
+    fr = fr + gam * fr * (1.0f - fr);
+    fg = fg + gam * fg * (1.0f - fg);
+    fb = fb + gam * fb * (1.0f - fb);
     fr = color_lim(fr * rm * bri + lift);
     fg = color_lim(fg * gm * bri + lift);
     fb = color_lim(fb * bm * bri + lift);
@@ -2250,7 +2358,7 @@ static void color_construir(void) {
       g_lut[v] = (uint16_t)((v & 0x8000) | ((int)(fr * 31.0f + 0.5f) << 10) | ((int)(fg * 31.0f + 0.5f) << 5) | (int)(fb * 31.0f + 0.5f));
     }
   }
-  g_lut_listo = g_color;
+  g_lut_listo = color_clave();
   g_lut_pf = pf;
 }
 
@@ -2260,8 +2368,8 @@ static int tomar_cuadro(void) {
   if (g_pf != 2 && g_pf != 0) return 0;
   if ((size_t)g_dw * (size_t)g_dh > (size_t)(1920 * 1080)) return 0;
   const unsigned char *src = (const unsigned char *)g_dp;
-  if (g_color) {
-    if (g_lut_listo != g_color || g_lut_pf != g_pf) color_construir();
+  if (color_activo()) {
+    if (g_lut_listo != color_clave() || g_lut_pf != g_pf) color_construir();
     for (unsigned y = 0; y < g_dh; y++) {
       const uint16_t *sp = (const uint16_t *)(src + (size_t)y * g_dpitch);
       uint16_t *dp = g_snap + (size_t)y * g_dw;
@@ -2274,6 +2382,7 @@ static int tomar_cuadro(void) {
   }
   g_sw = g_dw;
   g_sh = g_dh;
+  g_snap_ver++;
   return 1;
 }
 
@@ -2729,6 +2838,10 @@ static void recorte_cambiar(int d);
 static void nitido_cambiar(int d);
 static void dd_cambiar(int d);
 static void bic_cambiar(int d);
+static void cont_cambiar(int d);
+static void sat_cambiar(int d);
+static void gam_cambiar(int d);
+static void resp_cambiar(int d);
 static void brillo_cambiar(int d);
 static void ajustes_guardar_nombre(const char *nombre);
 static void ajustes_cargar_nombre(const char *nombre);
@@ -2736,9 +2849,9 @@ static void menu_refrescar(void);
 
 /* ---- Opciones antes de entrar al juego (triangulo en el menu de juegos) ---- */
 static int g_pop_vis = 0, g_pop_sel = 0;
-#define POP_N 18
+#define POP_N 22
 /* lineas de menu_refrescar() que valen sin juego cargado (Escala ... Calidad, Continuar) */
-static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 25, 18, 19};
+static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 29, 11, 12, 26, 27, 28, 13, 14, 15, 16, 17, 25, 18, 19};
 
 static void pop_ajustar(int idx, int dx) {
   g_msg[0] = 0;
@@ -2759,6 +2872,10 @@ static void pop_ajustar(int idx, int dx) {
     case 16: nitido_cambiar(dx); break;
     case 17: dd_cambiar(dx); break;
     case 25: bic_cambiar(dx); break;
+    case 26: cont_cambiar(dx); break;
+    case 27: sat_cambiar(dx); break;
+    case 28: gam_cambiar(dx); break;
+    case 29: resp_cambiar(dx); break;
     case 18: brillo_cambiar(dx); break;
     default: break;
   }
@@ -3338,7 +3455,7 @@ static void nit_cambiar(int d) {
 }
 
 static void crt_cambiar(int d) {
-  g_crt = (g_crt + d + 3) % 3;
+  g_crt = (g_crt + d + 4) % 4;
   FILE *f = fopen("/data/swan/crt.txt", "wb");
   if (f) { fputc('0' + g_crt, f); fclose(f); }
   esp("MENU: crt = %d", g_crt);
@@ -3350,11 +3467,64 @@ static void guardar_num(const char *ruta, int v) {
   if (f) { fputc('0' + v, f); fclose(f); }
 }
 
+/* Lee un ajuste guardado: un caracter '0'..'0'+maxv; resta se descuenta (para valores con signo) */
+static void cargar_ajuste(const char *ruta, int maxv, int resta, int *dest) {
+  FILE *f = fopen(ruta, "rb");
+  if (!f) return;
+  int c = fgetc(f);
+  fclose(f);
+  if (c >= '0' && c <= '0' + maxv) *dest = (c - '0') - resta;
+}
+
+/* Repite el ultimo cuadro con el filtro de color nuevo, para verlo ya con el menu abierto */
+static void color_refrescar_snap(void) {
+  if (g_dp) tomar_cuadro();
+}
+
+static int ajuste5(int *v, int d) {
+  *v += (d > 0) ? 1 : -1;
+  if (*v > 2) *v = -2;
+  if (*v < -2) *v = 2;
+  return *v;
+}
+
 static void color_cambiar(int d) {
   g_color = (g_color + d + 5) % 5;
   guardar_num("/data/swan/color.txt", g_color);
   esp("MENU: color = %d", g_color);
   snprintf(g_msg, sizeof(g_msg), "Filtro de color cambiado");
+  color_refrescar_snap();
+}
+
+static void cont_cambiar(int d) {
+  ajuste5(&g_cont, d);
+  guardar_num("/data/swan/cont.txt", g_cont + 2);
+  esp("MENU: contraste = %d", g_cont);
+  snprintf(g_msg, sizeof(g_msg), "Contraste %+d", g_cont);
+  color_refrescar_snap();
+}
+
+static void sat_cambiar(int d) {
+  ajuste5(&g_sat, d);
+  guardar_num("/data/swan/sat.txt", g_sat + 2);
+  esp("MENU: saturacion = %d", g_sat);
+  snprintf(g_msg, sizeof(g_msg), "Saturacion %+d", g_sat);
+  color_refrescar_snap();
+}
+
+static void gam_cambiar(int d) {
+  ajuste5(&g_gam, d);
+  guardar_num("/data/swan/gam.txt", g_gam + 2);
+  esp("MENU: gamma = %d", g_gam);
+  snprintf(g_msg, sizeof(g_msg), "Gamma %+d", g_gam);
+  color_refrescar_snap();
+}
+
+static void resp_cambiar(int d) {
+  g_resp = (g_resp + d + 3) % 3;
+  guardar_num("/data/swan/resp.txt", g_resp);
+  esp("MENU: resplandor = %d", g_resp);
+  snprintf(g_msg, sizeof(g_msg), "%s", g_resp ? "Resplandor activado (usa el escalado bicubico)" : "Resplandor desactivado");
 }
 
 static void fps_cambiar(void) {
@@ -3431,8 +3601,9 @@ static void ajustes_guardar_nombre(const char *nombre) {
   FILE *f = fopen(ruta, "wb");
   if (!f) return;
   int marco = g_marco_on ? g_marco_idx : g_nmarcos;
-  fprintf(f, "ajustes3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit, g_s2x ? 1 : 0,
-          g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco, g_dd, g_bic ? 1 : 0, g_brillo + 2);
+  fprintf(f, "ajustes4 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit,
+          g_s2x ? 1 : 0, g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco, g_dd, g_bic ? 1 : 0,
+          g_brillo + 2, g_cont + 2, g_sat + 2, g_gam + 2, g_resp);
   fclose(f);
   esp("AJUSTES: guardados para %s", id);
 }
@@ -3448,27 +3619,34 @@ static void ajustes_cargar_nombre(const char *nombre) {
   linea[0] = 0;
   if (!fgets(linea, sizeof(linea), f)) linea[0] = 0;
   fclose(f);
-  int v[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, g_dd, g_bic ? 1 : 0, g_brillo + 2};
-  int n = sscanf(linea, "ajustes3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
-                 &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
-  if (n != 15) {
-    int ant = 0; /* en ajustes2 este campo era la vineta (ya no existe) */
-    v[12] = g_dd;
-    v[13] = g_bic ? 1 : 0;
-    v[14] = g_brillo + 2;
-    n = sscanf(linea, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7],
-               &v[8], &v[9], &v[10], &v[11], &ant, &v[14]);
-    if (n == 14) {
-      n = 15;
+  int v[19] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, g_dd, g_bic ? 1 : 0, g_brillo + 2, g_cont + 2, g_sat + 2, g_gam + 2, g_resp};
+  int n = sscanf(linea, "ajustes4 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4],
+                 &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14], &v[15], &v[16], &v[17], &v[18]);
+  if (n != 19) {
+    n = sscanf(linea, "ajustes3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
+               &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
+    if (n == 15) {
+      n = 19;
     } else {
+      int ant = 0; /* en ajustes2 este campo era la vineta (ya no existe) */
+      v[12] = g_dd;
+      v[13] = g_bic ? 1 : 0;
       v[14] = g_brillo + 2;
-      n = sscanf(linea, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8],
-                 &v[9], &v[10], &v[11]);
-      if (n == 12) n = 15;
+      n = sscanf(linea, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
+                 &v[7], &v[8], &v[9], &v[10], &v[11], &ant, &v[14]);
+      if (n == 14) {
+        n = 19;
+      } else {
+        v[14] = g_brillo + 2;
+        n = sscanf(linea, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7],
+                   &v[8], &v[9], &v[10], &v[11]);
+        if (n == 12) n = 19;
+      }
     }
   }
-  if (n != 15 || v[14] < 0 || v[14] > 4 || v[12] < 0 || v[12] > 2 || v[13] < 0 || v[13] > 1 || v[0] < 0 || v[0] > 3 || v[2] < 0 ||
-      v[2] > 2 || v[3] < 0 || v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 || v[6] > 2 || v[7] < 0 || v[7] > 4) {
+  if (n != 19 || v[14] < 0 || v[14] > 4 || v[12] < 0 || v[12] > 2 || v[13] < 0 || v[13] > 1 || v[15] < 0 || v[15] > 4 || v[16] < 0 ||
+      v[16] > 4 || v[17] < 0 || v[17] > 4 || v[18] < 0 || v[18] > 2 || v[0] < 0 || v[0] > 3 || v[2] < 0 || v[2] > 2 || v[3] < 0 ||
+      v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 || v[6] > 3 || v[7] < 0 || v[7] > 4) {
     esp("AJUSTES: archivo de %s no valido", id);
     return;
   }
@@ -3486,6 +3664,10 @@ static void ajustes_cargar_nombre(const char *nombre) {
   g_dd = v[12];
   g_bic = v[13] ? 1 : 0;
   g_brillo = v[14] - 2;
+  g_cont = v[15] - 2;
+  g_sat = v[16] - 2;
+  g_gam = v[17] - 2;
+  g_resp = v[18];
   marco_fijar(v[11]);
   esp("AJUSTES: cargados para %s", id);
 }
@@ -3559,8 +3741,8 @@ static void menu_refrescar(void) {
   snprintf(g_ml[7], sizeof(g_ml[7]), "Nitidez: %s  (izq/der)", bd[g_nit % 3]);
   snprintf(g_ml[8], sizeof(g_ml[8]), g_s2x ? "Scale2x: Si (sin Bordes/Nitidez)" : "Scale2x: No");
   snprintf(g_ml[9], sizeof(g_ml[9]), "Recompilador JIT: %s (al reiniciar)", g_jit_pedido ? "Si" : "No");
-  const char *cr[3] = {"No", "Suave", "Fuerte"};
-  snprintf(g_ml[10], sizeof(g_ml[10]), "Efecto CRT: %s  (izq/der)", cr[g_crt % 3]);
+  const char *cr[4] = {"No", "Suave", "Fuerte", "Trinitron"};
+  snprintf(g_ml[10], sizeof(g_ml[10]), "Efecto CRT: %s  (izq/der)", cr[g_crt % 4]);
   if (g_nmarcos <= 0) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: no hay marco.png");
   else if (!g_marco_on) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: Ninguno  (izq/der)");
   else if (g_marco_idx >= 0 && g_marco_idx < 5 && g_marco_nom[g_marco_idx][0])
@@ -3583,6 +3765,13 @@ static void menu_refrescar(void) {
     snprintf(g_ml[17], sizeof(g_ml[17]), "Sin puntitos: %s  (izq/der)", dn_[g_dd % 3]);
   }
   snprintf(g_ml[25], sizeof(g_ml[25]), "Bicubico: %s", g_bic ? "Si" : "No");
+  snprintf(g_ml[26], sizeof(g_ml[26]), "Contraste: %+d  (izq/der)", g_cont);
+  snprintf(g_ml[27], sizeof(g_ml[27]), "Saturacion: %+d  (izq/der)", g_sat);
+  snprintf(g_ml[28], sizeof(g_ml[28]), "Gamma: %+d  (izq/der)", g_gam);
+  {
+    const char *rn_[3] = {"No", "Suave", "Fuerte"};
+    snprintf(g_ml[29], sizeof(g_ml[29]), "Resplandor: %s  (izq/der)", rn_[g_resp % 3]);
+  }
   snprintf(g_ml[18], sizeof(g_ml[18]), "Brillo: %+d  (izq/der)", g_brillo);
   snprintf(g_ml[23], sizeof(g_ml[23]), "Jugador 1: %s", g_pad >= 0 ? "conectado" : "no");
   snprintf(g_ml[24], sizeof(g_ml[24]), "Jugador 2: %s", g_pad2 >= 0 ? "conectado" : "no");
@@ -3641,8 +3830,8 @@ static void pausa_menu(void) {
     prev = m;
     int salir = 0;
     if (g_ops_ui) {
-      if (nw & (1u << 10)) { g_ops_cat = (g_ops_cat + 4) % 5; g_ops_fila = 0; }
-      if (nw & (1u << 11)) { g_ops_cat = (g_ops_cat + 1) % 5; g_ops_fila = 0; }
+      if (nw & (1u << 10)) { g_ops_cat = (g_ops_cat + 5) % 6; g_ops_fila = 0; }
+      if (nw & (1u << 11)) { g_ops_cat = (g_ops_cat + 1) % 6; g_ops_fila = 0; }
       int nf = ops_n(g_ops_cat);
       if (nw & (1u << 4)) g_ops_fila = (g_ops_fila + nf - 1) % nf;
       if (nw & (1u << 5)) g_ops_fila = (g_ops_fila + 1) % nf;
@@ -3673,6 +3862,10 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 16) nitido_cambiar(dx);
       else if (g_menu_sel == 17) dd_cambiar(dx);
       else if (g_menu_sel == 25) bic_cambiar(dx);
+      else if (g_menu_sel == 26) cont_cambiar(dx);
+      else if (g_menu_sel == 27) sat_cambiar(dx);
+      else if (g_menu_sel == 28) gam_cambiar(dx);
+      else if (g_menu_sel == 29) resp_cambiar(dx);
       else if (g_menu_sel == 18) brillo_cambiar(dx);
       else if (g_menu_sel == 22) disco_cambiar(dx);
     }
@@ -3702,6 +3895,10 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 16) nitido_cambiar(1);
       else if (g_menu_sel == 17) dd_cambiar(1);
       else if (g_menu_sel == 25) bic_cambiar(1);
+      else if (g_menu_sel == 26) cont_cambiar(1);
+      else if (g_menu_sel == 27) sat_cambiar(1);
+      else if (g_menu_sel == 28) gam_cambiar(1);
+      else if (g_menu_sel == 29) resp_cambiar(1);
       else if (g_menu_sel == 18) brillo_cambiar(1);
       else if (g_menu_sel == 19) salir = 1;
       else if (g_menu_sel == 22) disco_cambiar(1);
@@ -3997,7 +4194,7 @@ inicio_menu:;
       if (fc) {
         int c = fgetc(fc);
         fclose(fc);
-        if (c >= '0' && c <= '2') g_crt = c - '0';
+        if (c >= '0' && c <= '3') g_crt = c - '0';
       }
       esp("CRT inicial=%d", g_crt);
     }
@@ -4062,13 +4259,17 @@ inicio_menu:;
         fclose(fbc);
         if (c == '0' || c == '1') g_bic = c - '0';
       }
+      cargar_ajuste("/data/swan/cont.txt", 4, 2, &g_cont);
+      cargar_ajuste("/data/swan/sat.txt", 4, 2, &g_sat);
+      cargar_ajuste("/data/swan/gam.txt", 4, 2, &g_gam);
+      cargar_ajuste("/data/swan/resp.txt", 2, 0, &g_resp);
       FILE *fb = fopen("/data/swan/brillo.txt", "rb");
       if (fb) {
         int c = fgetc(fb);
         fclose(fb);
         if (c >= '0' && c <= '4') g_brillo = c - '0' - 2;
       }
-      esp("RECORTE inicial=%d nitido=%d sinpuntitos=%d bicubico=%d brillo=%d", g_recorte, g_nitido, g_dd, g_bic, g_brillo);
+      esp("RECORTE inicial=%d nitido=%d sinpuntitos=%d bicubico=%d brillo=%d contraste=%d saturacion=%d gamma=%d resplandor=%d", g_recorte, g_nitido, g_dd, g_bic, g_brillo, g_cont, g_sat, g_gam, g_resp);
     }
     ajustes_cargar_nombre(g_juego_id); /* ajustes propios de este juego, si los hay */
   }
