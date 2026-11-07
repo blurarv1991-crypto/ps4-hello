@@ -4078,6 +4078,16 @@ static void cierre_final(void) {
   esp("SALIR: return desde main");
 }
 
+/* Marca de diagnostico: se ejecuta antes de main(). Si ctor.txt aparece pero espia.txt no, la app murio entre medias */
+__attribute__((constructor(101))) static void marca_ctor(void) {
+  int fd = open("/data/swan/ctor.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd >= 0) {
+    static const char m[] = "ctor ok\n";
+    write(fd, m, sizeof(m) - 1);
+    close(fd);
+  }
+}
+
 int main(void) {
   /* el log se abre lo primero: si la app se cierra al arrancar, queda anotado hasta donde llego */
   mkdir("/data/swan", 0777);
