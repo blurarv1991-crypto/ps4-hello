@@ -276,7 +276,8 @@ static volatile int g_parar = 0; /* 1 = los hilos de audio y dibujo deben termin
 static SDL_Thread *g_th_audio = NULL;
 static SDL_Thread *g_th_dib = NULL;
 static char g_juego_id[96] = "juego";
-static unsigned char g_estbuf[40 * 1024 * 1024];
+static unsigned char *g_estbuf = NULL; /* se reserva al guardar/cargar un estado (antes era un bloque fijo de 40 MiB) */
+static size_t g_estcap = 0;
 static int g_cada = 3;
 
 /* audio */
@@ -3421,11 +3422,20 @@ static void estado_ruta(char *out, size_t n, int slot) {
   snprintf(out, n, "/data/swan/estado_%s_%d.sta", g_juego_id, slot);
 }
 
+static int estbuf_asegurar(size_t n) {
+  if (g_estbuf && n <= g_estcap) return 1;
+  free(g_estbuf);
+  g_estbuf = (unsigned char *)malloc(n);
+  g_estcap = g_estbuf ? n : 0;
+  return g_estbuf != NULL;
+}
+
 static void estado_guardar(void) {
   size_t sz = retro_serialize_size();
   esp("ESTADO guardar: ranura=%d tam=%u", g_ranura, (unsigned)sz);
   if (sz == 0) { snprintf(g_msg, sizeof(g_msg), "El nucleo no da tamano de estado"); return; }
-  if (sz > sizeof(g_estbuf)) { snprintf(g_msg, sizeof(g_msg), "Estado demasiado grande (%u KB)", (unsigned)(sz / 1024)); return; }
+  if (sz > (size_t)64 * 1024 * 1024) { snprintf(g_msg, sizeof(g_msg), "Estado demasiado grande (%u KB)", (unsigned)(sz / 1024)); return; }
+  if (!estbuf_asegurar(sz)) { snprintf(g_msg, sizeof(g_msg), "Sin memoria para el estado"); esp("ESTADO malloc FALLO %u", (unsigned)sz); return; }
   if (!retro_serialize(g_estbuf, sz)) { snprintf(g_msg, sizeof(g_msg), "Fallo al crear el estado"); esp("ESTADO retro_serialize FALLO"); return; }
   char p[220];
   estado_ruta(p, sizeof(p), g_ranura);
@@ -3444,7 +3454,8 @@ static void estado_cargar(void) {
   long long n = tam_ruta(p);
   esp("ESTADO cargar: %s tam=%lld", p, n);
   if (n <= 0) { snprintf(g_msg, sizeof(g_msg), "Ranura %d vacia", g_ranura); return; }
-  if ((unsigned long long)n > sizeof(g_estbuf)) { snprintf(g_msg, sizeof(g_msg), "Archivo demasiado grande"); return; }
+  if ((unsigned long long)n > (unsigned long long)64 * 1024 * 1024) { snprintf(g_msg, sizeof(g_msg), "Archivo demasiado grande"); return; }
+  if (!estbuf_asegurar((size_t)n)) { snprintf(g_msg, sizeof(g_msg), "Sin memoria para el estado"); esp("ESTADO malloc FALLO %lld", n); return; }
   FILE *f = fopen(p, "rb");
   if (!f) { snprintf(g_msg, sizeof(g_msg), "No se pudo abrir el archivo"); return; }
   size_t r = fread(g_estbuf, 1, (size_t)n, f);
