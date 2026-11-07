@@ -245,7 +245,6 @@ static int g_crt = 0; /* efecto CRT: 0 No, 1 Suave, 2 Fuerte, 3 Trinitron (linea
 static int g_color = 0;           /* filtro de color: 0 Original, 1 Natural, 2 Vivido, 3 Calido, 4 Retro */
 static int g_cont = 0, g_sat = 0, g_gam = 0; /* ajustes finos de color, -2 .. +2 */
 static int g_resp = 0;            /* resplandor de las zonas claras: 0 No, 1 Suave, 2 Fuerte */
-static int g_curv = 0;            /* curvatura de pantalla (tubo CRT): 0 No, 1 Suave, 2 Fuerte */
 static uint16_t g_lut[65536];     /* tabla de color para pixeles de 16 bits */
 static int g_lut_listo = -1;      /* filtro para el que esta calculada g_lut */
 static int g_lut_pf = -1;         /* formato de pixel para el que esta calculada */
@@ -276,8 +275,7 @@ static volatile int g_parar = 0; /* 1 = los hilos de audio y dibujo deben termin
 static SDL_Thread *g_th_audio = NULL;
 static SDL_Thread *g_th_dib = NULL;
 static char g_juego_id[96] = "juego";
-static unsigned char *g_estbuf = NULL; /* se reserva al guardar/cargar un estado (antes era un bloque fijo de 40 MiB) */
-static size_t g_estcap = 0;
+static unsigned char g_estbuf[40 * 1024 * 1024];
 static int g_cada = 3;
 
 /* audio */
@@ -1534,6 +1532,7 @@ static int bic_escalar(const uint16_t *src, int sw, int cr0, int nch, int W, int
   return 1;
 }
 
+static int g_curv = 0; /* prueba v2: solo el motor, sin menu */
 /* Curvatura de pantalla (efecto tubo CRT): cada pixel de salida toma su color de un punto un poco mas alejado
    del centro, mas cuanto mas cerca de las esquinas. Los bordes quedan curvos y las esquinas se pierden un poco
    (negro). Sin tablas grandes: un factor por fila y otro por columna. Se aplica antes de las lineas/mascara CRT. */
@@ -1542,7 +1541,7 @@ static int g_cv_n = -1, g_cv_W = 0, g_cv_H = 0;
 static int g_cv_gx[1920]; /* por columna: 1 + k*nx^2, en Q12 */
 static int g_cv_gy[1080]; /* por fila: 1 + k*ny^2, en Q16 */
 
-static void curvar_pantalla(int W, int H) {
+static void __attribute__((used)) curvar_pantalla(int W, int H) {
   if (W < 16 || H < 16 || W > 1920 || H > 1080) return;
   if (!g_cv_buf) {
     g_cv_buf = (uint16_t *)malloc((size_t)1920 * 1080 * 2);
@@ -1637,7 +1636,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   }
   {
     int key[24] = {(int)g_snap_ver, w, h, W, H, cr_t, cn, fill, g_suav, g_nitido ? 1 : 0, g_aa, g_nit, g_s2x ? 1 : 0, g_crt,
-                   g_bic ? 1 : 0, g_dd, g_resp, g_pf, g_forzar_W, g_forzar_H, g_modo, g_asp ? 1 : 0, g_curv, 0};
+                   g_bic ? 1 : 0, g_dd, g_resp, g_pf, g_forzar_W, g_forzar_H, g_modo, g_asp ? 1 : 0, 0, 0};
     if (g_ec_ok && g_tex2 && g_t2w == W && g_t2h == H && memcmp(key, g_ec_key, sizeof(key)) == 0) {
       *ow = W;
       *oh = H;
@@ -1719,7 +1718,6 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
   }
   }
-  if (g_curv) curvar_pantalla(W, H);
   if (g_crt) crt_lineas(W, H);
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
@@ -1988,7 +1986,7 @@ struct OpsCat {
 };
 static const OpsCat OPS_CAT[6] = {
     {"Pantalla", 0, 11, {3, 4, 15, 5, 6, 7, 8, 16, 25, 17, 11}},
-    {"Imagen", 2, 8, {18, 12, 26, 27, 28, 10, 30, 29}},
+    {"Imagen", 2, 7, {18, 12, 26, 27, 28, 10, 29}},
     {"Jugabilidad", 1, 4, {0, 1, 2, 22}},
     {"Control", 3, 2, {23, 24}},
     {"Sistema", 4, 3, {9, 14, 13}},
@@ -2887,7 +2885,6 @@ static void cont_cambiar(int d);
 static void sat_cambiar(int d);
 static void gam_cambiar(int d);
 static void resp_cambiar(int d);
-static void curv_cambiar(int d);
 static void brillo_cambiar(int d);
 static void ajustes_guardar_nombre(const char *nombre);
 static void ajustes_cargar_nombre(const char *nombre);
@@ -2895,9 +2892,9 @@ static void menu_refrescar(void);
 
 /* ---- Opciones antes de entrar al juego (triangulo en el menu de juegos) ---- */
 static int g_pop_vis = 0, g_pop_sel = 0;
-#define POP_N 23
+#define POP_N 22
 /* lineas de menu_refrescar() que valen sin juego cargado (Escala ... Calidad, Continuar) */
-static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 30, 29, 11, 12, 26, 27, 28, 13, 14, 15, 16, 17, 25, 18, 19};
+static const int POP_IDX[POP_N] = {3, 4, 5, 6, 7, 8, 9, 10, 29, 11, 12, 26, 27, 28, 13, 14, 15, 16, 17, 25, 18, 19};
 
 static void pop_ajustar(int idx, int dx) {
   g_msg[0] = 0;
@@ -2922,7 +2919,6 @@ static void pop_ajustar(int idx, int dx) {
     case 27: sat_cambiar(dx); break;
     case 28: gam_cambiar(dx); break;
     case 29: resp_cambiar(dx); break;
-    case 30: curv_cambiar(dx); break;
     case 18: brillo_cambiar(dx); break;
     default: break;
   }
@@ -3422,20 +3418,11 @@ static void estado_ruta(char *out, size_t n, int slot) {
   snprintf(out, n, "/data/swan/estado_%s_%d.sta", g_juego_id, slot);
 }
 
-static int estbuf_asegurar(size_t n) {
-  if (g_estbuf && n <= g_estcap) return 1;
-  free(g_estbuf);
-  g_estbuf = (unsigned char *)malloc(n);
-  g_estcap = g_estbuf ? n : 0;
-  return g_estbuf != NULL;
-}
-
 static void estado_guardar(void) {
   size_t sz = retro_serialize_size();
   esp("ESTADO guardar: ranura=%d tam=%u", g_ranura, (unsigned)sz);
   if (sz == 0) { snprintf(g_msg, sizeof(g_msg), "El nucleo no da tamano de estado"); return; }
-  if (sz > (size_t)64 * 1024 * 1024) { snprintf(g_msg, sizeof(g_msg), "Estado demasiado grande (%u KB)", (unsigned)(sz / 1024)); return; }
-  if (!estbuf_asegurar(sz)) { snprintf(g_msg, sizeof(g_msg), "Sin memoria para el estado"); esp("ESTADO malloc FALLO %u", (unsigned)sz); return; }
+  if (sz > sizeof(g_estbuf)) { snprintf(g_msg, sizeof(g_msg), "Estado demasiado grande (%u KB)", (unsigned)(sz / 1024)); return; }
   if (!retro_serialize(g_estbuf, sz)) { snprintf(g_msg, sizeof(g_msg), "Fallo al crear el estado"); esp("ESTADO retro_serialize FALLO"); return; }
   char p[220];
   estado_ruta(p, sizeof(p), g_ranura);
@@ -3454,8 +3441,7 @@ static void estado_cargar(void) {
   long long n = tam_ruta(p);
   esp("ESTADO cargar: %s tam=%lld", p, n);
   if (n <= 0) { snprintf(g_msg, sizeof(g_msg), "Ranura %d vacia", g_ranura); return; }
-  if ((unsigned long long)n > (unsigned long long)64 * 1024 * 1024) { snprintf(g_msg, sizeof(g_msg), "Archivo demasiado grande"); return; }
-  if (!estbuf_asegurar((size_t)n)) { snprintf(g_msg, sizeof(g_msg), "Sin memoria para el estado"); esp("ESTADO malloc FALLO %lld", n); return; }
+  if ((unsigned long long)n > sizeof(g_estbuf)) { snprintf(g_msg, sizeof(g_msg), "Archivo demasiado grande"); return; }
   FILE *f = fopen(p, "rb");
   if (!f) { snprintf(g_msg, sizeof(g_msg), "No se pudo abrir el archivo"); return; }
   size_t r = fread(g_estbuf, 1, (size_t)n, f);
@@ -3577,13 +3563,6 @@ static void gam_cambiar(int d) {
   color_refrescar_snap();
 }
 
-static void curv_cambiar(int d) {
-  g_curv = (g_curv + d + 3) % 3;
-  guardar_num("/data/swan/curv.txt", g_curv);
-  esp("MENU: curvatura = %d", g_curv);
-  snprintf(g_msg, sizeof(g_msg), "%s", g_curv ? "Curvatura activada (se pierde un poco de las esquinas)" : "Curvatura desactivada");
-}
-
 static void resp_cambiar(int d) {
   g_resp = (g_resp + d + 3) % 3;
   guardar_num("/data/swan/resp.txt", g_resp);
@@ -3665,9 +3644,9 @@ static void ajustes_guardar_nombre(const char *nombre) {
   FILE *f = fopen(ruta, "wb");
   if (!f) return;
   int marco = g_marco_on ? g_marco_idx : g_nmarcos;
-  fprintf(f, "ajustes5 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit,
+  fprintf(f, "ajustes4 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", g_modo, g_asp ? 1 : 0, g_suav, g_aa, g_nit,
           g_s2x ? 1 : 0, g_crt, g_color, g_fps_on ? 1 : 0, g_recorte ? 1 : 0, g_nitido ? 1 : 0, marco, g_dd, g_bic ? 1 : 0,
-          g_brillo + 2, g_cont + 2, g_sat + 2, g_gam + 2, g_resp, g_curv);
+          g_brillo + 2, g_cont + 2, g_sat + 2, g_gam + 2, g_resp);
   fclose(f);
   esp("AJUSTES: guardados para %s", id);
 }
@@ -3683,40 +3662,34 @@ static void ajustes_cargar_nombre(const char *nombre) {
   linea[0] = 0;
   if (!fgets(linea, sizeof(linea), f)) linea[0] = 0;
   fclose(f);
-  int v[20] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, g_dd, g_bic ? 1 : 0, g_brillo + 2, g_cont + 2, g_sat + 2, g_gam + 2, g_resp, g_curv};
-  int n = sscanf(linea, "ajustes5 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4],
-                 &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14], &v[15], &v[16], &v[17], &v[18], &v[19]);
-  if (n != 20) {
-    n = sscanf(linea, "ajustes4 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4],
-               &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14], &v[15], &v[16], &v[17], &v[18]);
-    if (n == 19) {
-      n = 20;
+  int v[19] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, g_dd, g_bic ? 1 : 0, g_brillo + 2, g_cont + 2, g_sat + 2, g_gam + 2, g_resp};
+  int n = sscanf(linea, "ajustes4 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4],
+                 &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14], &v[15], &v[16], &v[17], &v[18]);
+  if (n != 19) {
+    n = sscanf(linea, "ajustes3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
+               &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
+    if (n == 15) {
+      n = 19;
     } else {
-      n = sscanf(linea, "ajustes3 %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
-                 &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
-      if (n == 15) {
-        n = 20;
+      int ant = 0; /* en ajustes2 este campo era la vineta (ya no existe) */
+      v[12] = g_dd;
+      v[13] = g_bic ? 1 : 0;
+      v[14] = g_brillo + 2;
+      n = sscanf(linea, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
+                 &v[7], &v[8], &v[9], &v[10], &v[11], &ant, &v[14]);
+      if (n == 14) {
+        n = 19;
       } else {
-        int ant = 0; /* en ajustes2 este campo era la vineta (ya no existe) */
-        v[12] = g_dd;
-        v[13] = g_bic ? 1 : 0;
         v[14] = g_brillo + 2;
-        n = sscanf(linea, "ajustes2 %d %d %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6],
-                   &v[7], &v[8], &v[9], &v[10], &v[11], &ant, &v[14]);
-        if (n == 14) {
-          n = 20;
-        } else {
-          v[14] = g_brillo + 2;
-          n = sscanf(linea, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7],
-                     &v[8], &v[9], &v[10], &v[11]);
-          if (n == 12) n = 20;
-        }
+        n = sscanf(linea, "ajustes1 %d %d %d %d %d %d %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7],
+                   &v[8], &v[9], &v[10], &v[11]);
+        if (n == 12) n = 19;
       }
     }
   }
-  if (n != 20 || v[19] < 0 || v[19] > 2 || v[14] < 0 || v[14] > 4 || v[12] < 0 || v[12] > 2 || v[13] < 0 || v[13] > 1 || v[15] < 0 ||
-      v[15] > 4 || v[16] < 0 || v[16] > 4 || v[17] < 0 || v[17] > 4 || v[18] < 0 || v[18] > 2 || v[0] < 0 || v[0] > 3 || v[2] < 0 ||
-      v[2] > 2 || v[3] < 0 || v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 || v[6] > 3 || v[7] < 0 || v[7] > 4) {
+  if (n != 19 || v[14] < 0 || v[14] > 4 || v[12] < 0 || v[12] > 2 || v[13] < 0 || v[13] > 1 || v[15] < 0 || v[15] > 4 || v[16] < 0 ||
+      v[16] > 4 || v[17] < 0 || v[17] > 4 || v[18] < 0 || v[18] > 2 || v[0] < 0 || v[0] > 3 || v[2] < 0 || v[2] > 2 || v[3] < 0 ||
+      v[3] > 2 || v[4] < 0 || v[4] > 2 || v[6] < 0 || v[6] > 3 || v[7] < 0 || v[7] > 4) {
     esp("AJUSTES: archivo de %s no valido", id);
     return;
   }
@@ -3738,7 +3711,6 @@ static void ajustes_cargar_nombre(const char *nombre) {
   g_sat = v[16] - 2;
   g_gam = v[17] - 2;
   g_resp = v[18];
-  g_curv = v[19];
   marco_fijar(v[11]);
   esp("AJUSTES: cargados para %s", id);
 }
@@ -3842,7 +3814,6 @@ static void menu_refrescar(void) {
   {
     const char *rn_[3] = {"No", "Suave", "Fuerte"};
     snprintf(g_ml[29], sizeof(g_ml[29]), "Resplandor: %s  (izq/der)", rn_[g_resp % 3]);
-    snprintf(g_ml[30], sizeof(g_ml[30]), "Curvatura: %s  (izq/der)", rn_[g_curv % 3]);
   }
   snprintf(g_ml[18], sizeof(g_ml[18]), "Brillo: %+d  (izq/der)", g_brillo);
   snprintf(g_ml[23], sizeof(g_ml[23]), "Jugador 1: %s", g_pad >= 0 ? "conectado" : "no");
@@ -3938,7 +3909,6 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 27) sat_cambiar(dx);
       else if (g_menu_sel == 28) gam_cambiar(dx);
       else if (g_menu_sel == 29) resp_cambiar(dx);
-      else if (g_menu_sel == 30) curv_cambiar(dx);
       else if (g_menu_sel == 18) brillo_cambiar(dx);
       else if (g_menu_sel == 22) disco_cambiar(dx);
     }
@@ -3972,7 +3942,6 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 27) sat_cambiar(1);
       else if (g_menu_sel == 28) gam_cambiar(1);
       else if (g_menu_sel == 29) resp_cambiar(1);
-      else if (g_menu_sel == 30) curv_cambiar(1);
       else if (g_menu_sel == 18) brillo_cambiar(1);
       else if (g_menu_sel == 19) salir = 1;
       else if (g_menu_sel == 22) disco_cambiar(1);
@@ -4089,7 +4058,6 @@ static void cierre_final(void) {
   esp("SALIR: return desde main");
 }
 
-/* Marca de diagnostico: se ejecuta antes de main(). Si ctor.txt aparece pero espia.txt no, la app murio entre medias */
 __attribute__((constructor(101))) static void marca_ctor(void) {
   int fd = open("/data/swan/ctor.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd >= 0) {
@@ -4100,10 +4068,9 @@ __attribute__((constructor(101))) static void marca_ctor(void) {
 }
 
 int main(void) {
-  /* el log se abre lo primero: si la app se cierra al arrancar, queda anotado hasta donde llego */
   mkdir("/data/swan", 0777);
   g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  esp("INICIO main (version con curvatura)");
+  esp("INICIO main (prueba v2)");
   SDL_Init(SDL_INIT_VIDEO);
   esp("SDL_Init listo");
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
@@ -4352,14 +4319,13 @@ inicio_menu:;
       cargar_ajuste("/data/swan/sat.txt", 4, 2, &g_sat);
       cargar_ajuste("/data/swan/gam.txt", 4, 2, &g_gam);
       cargar_ajuste("/data/swan/resp.txt", 2, 0, &g_resp);
-      cargar_ajuste("/data/swan/curv.txt", 2, 0, &g_curv);
       FILE *fb = fopen("/data/swan/brillo.txt", "rb");
       if (fb) {
         int c = fgetc(fb);
         fclose(fb);
         if (c >= '0' && c <= '4') g_brillo = c - '0' - 2;
       }
-      esp("RECORTE inicial=%d nitido=%d sinpuntitos=%d bicubico=%d brillo=%d contraste=%d saturacion=%d gamma=%d resplandor=%d curvatura=%d", g_recorte, g_nitido, g_dd, g_bic, g_brillo, g_cont, g_sat, g_gam, g_resp, g_curv);
+      esp("RECORTE inicial=%d nitido=%d sinpuntitos=%d bicubico=%d brillo=%d contraste=%d saturacion=%d gamma=%d resplandor=%d", g_recorte, g_nitido, g_dd, g_bic, g_brillo, g_cont, g_sat, g_gam, g_resp);
     }
     ajustes_cargar_nombre(g_juego_id); /* ajustes propios de este juego, si los hay */
   }
