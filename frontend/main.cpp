@@ -239,7 +239,7 @@ static int g_marco_lin = 1;  /* 1 = filtro lineal; con /data/swan/marco_rapido.t
 #define MARCO_MAX_BANDAS 200
 static struct { short y, h, l, r; } g_bandas[MARCO_MAX_BANDAS]; /* zonas del marco que se mezclan sobre el juego */
 static int g_nbandas = 0;
-#define MARCO_MAX 5  /* marco.png, marco2.png ... marco5.png (solo uno en memoria a la vez) */
+#define MARCO_MAX 8  /* marco.png, marco2.png ... marco8.png (solo uno en memoria a la vez; maximo 9 por el guardado en un digito) */
 static int g_nmarcos = 0, g_marco_idx = 0;
 static int g_crt = 0; /* efecto CRT: 0 No, 1 Suave, 2 Fuerte, 3 Trinitron (lineas + mascara de fosforo) */
 static int g_color = 0;           /* filtro de color: 0 Original, 1 Natural, 2 Vivido, 3 Calido, 4 Retro */
@@ -890,7 +890,7 @@ static SDL_Texture *g_ops_iconos = NULL; /* /data/swan/ops_iconos.png: 6 iconos 
 static int g_ops_ui = 0;                 /* 1 = el menu del juego usa el diseno con secciones */
 static int g_ops_cat = 0, g_ops_fila = 0;
 static int g_brillo = 0;  /* -2 .. +2 */
-static char g_marco_nom[5][24]; /* nombres de los marcos: /data/swan/marco_nombres.txt (una linea por marco) */
+static char g_marco_nom[MARCO_MAX][24]; /* nombres de los marcos: /data/swan/marco_nombres.txt (una linea por marco) */
 static int g_marco_nom_ok = 0;
 static int g_cr_t = -1, g_cr_b = -1;               /* filas negras detectadas arriba y abajo */
 static int g_cr_w = 0, g_cr_h = 0, g_cr_cnt = 0;
@@ -1530,49 +1530,6 @@ static int bic_escalar(const uint16_t *src, int sw, int cr0, int nch, int W, int
     }
   }
   return 1;
-}
-
-static int g_curv = 0; /* prueba v2: solo el motor, sin menu */
-/* Curvatura de pantalla (efecto tubo CRT): cada pixel de salida toma su color de un punto un poco mas alejado
-   del centro, mas cuanto mas cerca de las esquinas. Los bordes quedan curvos y las esquinas se pierden un poco
-   (negro). Sin tablas grandes: un factor por fila y otro por columna. Se aplica antes de las lineas/mascara CRT. */
-static uint16_t *g_cv_buf = NULL;
-static int g_cv_n = -1, g_cv_W = 0, g_cv_H = 0;
-static int g_cv_gx[1920]; /* por columna: 1 + k*nx^2, en Q12 */
-static int g_cv_gy[1080]; /* por fila: 1 + k*ny^2, en Q16 */
-
-static void __attribute__((used)) curvar_pantalla(int W, int H) {
-  if (W < 16 || H < 16 || W > 1920 || H > 1080) return;
-  if (!g_cv_buf) {
-    g_cv_buf = (uint16_t *)malloc((size_t)1920 * 1080 * 2);
-    if (!g_cv_buf) return;
-  }
-  if (g_cv_n != g_curv || g_cv_W != W || g_cv_H != H) {
-    const float k = (g_curv >= 2) ? 0.06f : 0.03f;
-    for (int x = 0; x < W; x++) {
-      float nx = ((x + 0.5f) / (float)W) * 2.0f - 1.0f;
-      g_cv_gx[x] = (int)((1.0f + k * nx * nx) * 4096.0f + 0.5f);
-    }
-    for (int y = 0; y < H; y++) {
-      float ny = ((y + 0.5f) / (float)H) * 2.0f - 1.0f;
-      g_cv_gy[y] = (int)((1.0f + k * ny * ny) * 65536.0f + 0.5f);
-    }
-    g_cv_n = g_curv;
-    g_cv_W = W;
-    g_cv_H = H;
-  }
-  memcpy(g_cv_buf, g_sbuf, (size_t)W * (size_t)H * 2);
-  const int Hc = H << 19;
-  for (int y = 0; y < H; y++) {
-    uint16_t *d = g_sbuf + (size_t)y * (size_t)W;
-    const int dyq = (2 * y + 1 - H) * 128;
-    const int gy = g_cv_gy[y];
-    for (int x = 0; x < W; x++) {
-      int ys = (Hc + dyq * g_cv_gx[x]) >> 20;
-      int xs = ((W << 15) + (((2 * x + 1 - W) * gy) >> 1)) >> 16;
-      d[x] = ((unsigned)xs < (unsigned)W && (unsigned)ys < (unsigned)H) ? g_cv_buf[(size_t)ys * (size_t)W + (size_t)xs] : (uint16_t)0;
-    }
-  }
 }
 
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
@@ -3763,7 +3720,7 @@ static void menu_refrescar(void) {
     FILE *fn = fopen("/data/swan/marco_nombres.txt", "rb");
     if (fn) {
       char ln[64];
-      for (int i = 0; i < 5 && fgets(ln, sizeof(ln), fn); i++) {
+      for (int i = 0; i < MARCO_MAX && fgets(ln, sizeof(ln), fn); i++) {
         size_t L = strlen(ln);
         while (L > 0 && (ln[L - 1] == '\n' || ln[L - 1] == '\r' || ln[L - 1] == ' ')) ln[--L] = 0;
         snprintf(g_marco_nom[i], sizeof(g_marco_nom[i]), "%s", ln);
@@ -3788,7 +3745,7 @@ static void menu_refrescar(void) {
   snprintf(g_ml[10], sizeof(g_ml[10]), "Efecto CRT: %s  (izq/der)", cr[g_crt % 4]);
   if (g_nmarcos <= 0) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: no hay marco.png");
   else if (!g_marco_on) snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: Ninguno  (izq/der)");
-  else if (g_marco_idx >= 0 && g_marco_idx < 5 && g_marco_nom[g_marco_idx][0])
+  else if (g_marco_idx >= 0 && g_marco_idx < MARCO_MAX && g_marco_nom[g_marco_idx][0])
     snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: %s (%d de %d)  (izq/der)", g_marco_nom[g_marco_idx], g_marco_idx + 1, g_nmarcos);
   else snprintf(g_ml[11], sizeof(g_ml[11]), "Marco: %d de %d  (izq/der)", g_marco_idx + 1, g_nmarcos);
   const char *co[5] = {"Original", "Natural", "Vivido", "Calido", "Retro"};
@@ -4058,31 +4015,18 @@ static void cierre_final(void) {
   esp("SALIR: return desde main");
 }
 
-__attribute__((constructor(101))) static void marca_ctor(void) {
-  int fd = open("/data/swan/ctor.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  if (fd >= 0) {
-    static const char m[] = "ctor ok\n";
-    write(fd, m, sizeof(m) - 1);
-    close(fd);
-  }
-}
-
 int main(void) {
-  mkdir("/data/swan", 0777);
-  g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  esp("INICIO main (prueba v2)");
   SDL_Init(SDL_INIT_VIDEO);
-  esp("SDL_Init listo");
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
-  esp("ventana creada");
   R = SDL_CreateRenderer(w, -1, 0);
   if (!R) R = SDL_CreateRenderer(w, -1, SDL_RENDERER_SOFTWARE);
-  esp("renderer creado");
   g_main = SDL_ThreadID();
+  mkdir("/data/swan", 0777);
 
   /* Por defecto: Cached Interpreter. Con /data/swan/puro.txt: interprete puro */
   g_interp = existe("/data/swan/puro.txt") ? 1 : 0;
   g_cached = g_interp ? 0 : 1;
+  g_fd = open("/data/swan/espia.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
   esp("ARRANQUE interp=%d cached=%d", g_interp, g_cached);
   if (existe("/data/swan/jit.txt")) {
     g_jit = 1;
