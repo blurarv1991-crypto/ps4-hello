@@ -1532,6 +1532,49 @@ static int bic_escalar(const uint16_t *src, int sw, int cr0, int nch, int W, int
   return 1;
 }
 
+static int g_curv = 0; /* etapa 1: solo el motor de curvatura, sin menu ni uso */
+/* Curvatura de pantalla (efecto tubo CRT): cada pixel de salida toma su color de un punto un poco mas alejado
+   del centro, mas cuanto mas cerca de las esquinas. Los bordes quedan curvos y las esquinas se pierden un poco
+   (negro). Sin tablas grandes: un factor por fila y otro por columna. Se aplica antes de las lineas/mascara CRT. */
+static uint16_t *g_cv_buf = NULL;
+static int g_cv_n = -1, g_cv_W = 0, g_cv_H = 0;
+static int g_cv_gx[1920]; /* por columna: 1 + k*nx^2, en Q12 */
+static int g_cv_gy[1080]; /* por fila: 1 + k*ny^2, en Q16 */
+
+static void __attribute__((used)) curvar_pantalla(int W, int H) {
+  if (W < 16 || H < 16 || W > 1920 || H > 1080) return;
+  if (!g_cv_buf) {
+    g_cv_buf = (uint16_t *)malloc((size_t)1920 * 1080 * 2);
+    if (!g_cv_buf) return;
+  }
+  if (g_cv_n != g_curv || g_cv_W != W || g_cv_H != H) {
+    const float k = (g_curv >= 2) ? 0.06f : 0.03f;
+    for (int x = 0; x < W; x++) {
+      float nx = ((x + 0.5f) / (float)W) * 2.0f - 1.0f;
+      g_cv_gx[x] = (int)((1.0f + k * nx * nx) * 4096.0f + 0.5f);
+    }
+    for (int y = 0; y < H; y++) {
+      float ny = ((y + 0.5f) / (float)H) * 2.0f - 1.0f;
+      g_cv_gy[y] = (int)((1.0f + k * ny * ny) * 65536.0f + 0.5f);
+    }
+    g_cv_n = g_curv;
+    g_cv_W = W;
+    g_cv_H = H;
+  }
+  memcpy(g_cv_buf, g_sbuf, (size_t)W * (size_t)H * 2);
+  const int Hc = H << 19;
+  for (int y = 0; y < H; y++) {
+    uint16_t *d = g_sbuf + (size_t)y * (size_t)W;
+    const int dyq = (2 * y + 1 - H) * 128;
+    const int gy = g_cv_gy[y];
+    for (int x = 0; x < W; x++) {
+      int ys = (Hc + dyq * g_cv_gx[x]) >> 20;
+      int xs = ((W << 15) + (((2 * x + 1 - W) * gy) >> 1)) >> 16;
+      d[x] = ((unsigned)xs < (unsigned)W && (unsigned)ys < (unsigned)H) ? g_cv_buf[(size_t)ys * (size_t)W + (size_t)xs] : (uint16_t)0;
+    }
+  }
+}
+
 /* Escalado propio por enteros (vecino mas cercano), solo 16 bits por pixel.
    kpedido: 2, 3 o 0 (= el maximo que cabe en 1920x1080) */
 /* Guarda la imagen ya escalada: si nada cambio (por ejemplo con el menu abierto y el juego en pausa) no se repite el trabajo */
