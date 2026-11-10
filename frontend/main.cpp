@@ -235,6 +235,7 @@ static int g_marco_on = 1;   /* L2+R2+R3 activa/desactiva el marco */
 static int g_forzar_W = 0, g_forzar_H = 0; /* >0: escalar_propio produce exactamente ese tamano (marco) */
 static int g_tex_lin = 0;    /* 1 si g_tex se creo con filtro lineal */
 static SDL_Rect g_marco_hueco = {0, 0, 0, 0};
+static int g_marco_siempre = 0; /* con /data/swan/marco_siempre.txt el marco se repinta entero en cada cuadro */
 static int g_marco_lin = 1;  /* 1 = filtro lineal; con /data/swan/marco_rapido.txt pasa a 0 (mas rapido) */
 #define MARCO_MAX_BANDAS 200
 static struct { short y, h, l, r; } g_bandas[MARCO_MAX_BANDAS]; /* zonas del marco que se mezclan sobre el juego */
@@ -1825,6 +1826,8 @@ static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
   {
     FILE *fr = fopen("/data/swan/marco_rapido.txt", "rb");
     if (fr) { fclose(fr); g_marco_lin = 0; }
+    FILE *fs = fopen("/data/swan/marco_siempre.txt", "rb");
+    if (fs) { fclose(fs); g_marco_siempre = 1; }
   }
   /* lo transparente queda en negro puro (asi el marco se puede copiar sin mezclar fuera del hueco) */
   for (long long q = 0; q < (long long)w * h; q++) {
@@ -1861,11 +1864,34 @@ static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
     }
   }
   if (g_marco_hueco.w > 0 && g_marco_hueco.h > 0) {
-    g_marco_tex = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+    Uint32 mfmt = SDL_PIXELFORMAT_RGBA32;
+    Uint32 pref = 0;
+    {
+      SDL_RendererInfo mri;
+      memset(&mri, 0, sizeof(mri));
+      if (SDL_GetRendererInfo(R, &mri) == 0 && mri.num_texture_formats > 0) {
+        pref = mri.texture_formats[0];
+        if (pref == SDL_PIXELFORMAT_XRGB8888) mfmt = SDL_PIXELFORMAT_ARGB8888;
+        else if (pref == SDL_PIXELFORMAT_XBGR8888) mfmt = SDL_PIXELFORMAT_ABGR8888;
+        else if (SDL_BYTESPERPIXEL(pref) == 4 && SDL_ISPIXELFORMAT_ALPHA(pref)) mfmt = pref;
+      }
+    }
+    unsigned char *conv = NULL;
+    if (mfmt != SDL_PIXELFORMAT_RGBA32) {
+      conv = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+      if (!conv || SDL_ConvertPixels(w, h, SDL_PIXELFORMAT_RGBA32, px, w * 4, mfmt, conv, w * 4) != 0) {
+        free(conv);
+        conv = NULL;
+        mfmt = SDL_PIXELFORMAT_RGBA32;
+      }
+    }
+    g_marco_tex = SDL_CreateTexture(R, mfmt, SDL_TEXTUREACCESS_STATIC, w, h);
     if (g_marco_tex) {
-      SDL_UpdateTexture(g_marco_tex, NULL, px, w * 4);
+      SDL_UpdateTexture(g_marco_tex, NULL, conv ? conv : px, w * 4);
       SDL_SetTextureBlendMode(g_marco_tex, SDL_BLENDMODE_BLEND);
     }
+    free(conv);
+    esp("MARCO: formato de textura=%s (el renderizador prefiere %s)", SDL_GetPixelFormatName(mfmt), SDL_GetPixelFormatName(pref));
   }
   stbi_image_free(px);
   esp("MARCO: %dx%d hueco=%d,%d %dx%d recorte=%d,%d tex=%p bandas=%d lineal=%d", w, h, g_marco_hueco.x, g_marco_hueco.y,
@@ -2164,11 +2190,25 @@ static void overlay_juego(const SDL_Rect *r) {
 
 static void dibujar_juego_interno(void) {
   double t0 = ahora_us();
+  int marco = (g_marco_tex && g_marco_on && g_sw > 0 && g_sh > 0) ? 1 : 0;
+  /* con el renderizador por software la pantalla conserva lo dibujado: tras pintar el marco entero unas
+     cuantas veces solo se redibuja el hueco del juego (y las esquinas del cristal) */
+  static SDL_Texture *mt_prev = NULL;
+  static SDL_Rect mh_prev = {0, 0, 0, 0};
+  static int m_llenos = 0;
+  int solo_hueco = 0;
+  if (!marco || g_menu_vis || g_splash_debug || g_marco_siempre || g_nbandas <= 0 || mt_prev != g_marco_tex ||
+      memcmp(&mh_prev, &g_marco_hueco, sizeof(SDL_Rect)) != 0) {
+    m_llenos = 0;
+  } else if (m_llenos >= 8) {
+    solo_hueco = 1;
+  }
+  mt_prev = g_marco_tex;
+  mh_prev = g_marco_hueco;
   SDL_SetRenderDrawColor(R, 0, 0, 0, 255);
-  SDL_RenderClear(R);
+  if (!solo_hueco) SDL_RenderClear(R);
   SDL_RenderSetScale(R, 1, 1);
   int hecho = 0;
-  int marco = (g_marco_tex && g_marco_on && g_sw > 0 && g_sh > 0) ? 1 : 0;
   /* con marco: el juego se escala con el escalador propio (rapido) directo al tamano del hueco */
   int pipe_ok = 0;
   if (marco && g_rec_x == 0 && g_rec_y == 0) {
@@ -2209,15 +2249,18 @@ static void dibujar_juego_interno(void) {
     if (g_nbandas > 0) {
       /* 1) el marco se copia sin mezclar fuera del hueco; 2) el juego; 3) solo las esquinas se mezclan encima */
       int hx = g_marco_hueco.x, hy = g_marco_hueco.y, hw = g_marco_hueco.w, hh = g_marco_hueco.h;
-      SDL_SetTextureBlendMode(g_marco_tex, SDL_BLENDMODE_NONE);
       SDL_Rect z1 = {0, 0, 1920, hy};
       SDL_Rect z2 = {0, hy + hh, 1920, 1080 - (hy + hh)};
       SDL_Rect z3 = {0, hy, hx, hh};
       SDL_Rect z4 = {hx + hw, hy, 1920 - (hx + hw), hh};
-      if (z1.h > 0) SDL_RenderCopy(R, g_marco_tex, &z1, &z1);
-      if (z2.h > 0) SDL_RenderCopy(R, g_marco_tex, &z2, &z2);
-      if (z3.w > 0) SDL_RenderCopy(R, g_marco_tex, &z3, &z3);
-      if (z4.w > 0) SDL_RenderCopy(R, g_marco_tex, &z4, &z4);
+      if (!solo_hueco) {
+        SDL_SetTextureBlendMode(g_marco_tex, SDL_BLENDMODE_NONE);
+        if (z1.h > 0) SDL_RenderCopy(R, g_marco_tex, &z1, &z1);
+        if (z2.h > 0) SDL_RenderCopy(R, g_marco_tex, &z2, &z2);
+        if (z3.w > 0) SDL_RenderCopy(R, g_marco_tex, &z3, &z3);
+        if (z4.w > 0) SDL_RenderCopy(R, g_marco_tex, &z4, &z4);
+        if (m_llenos < 8) m_llenos++;
+      }
       SDL_RenderCopy(R, gt, gsrc, &g_marco_hueco);
       overlay_juego(&g_marco_hueco);
       SDL_SetTextureBlendMode(g_marco_tex, SDL_BLENDMODE_BLEND);
