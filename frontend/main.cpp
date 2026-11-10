@@ -181,6 +181,7 @@ bool retro_unserialize(const void *data, size_t size);
 static SDL_Renderer *R;
 static SDL_Texture *g_tex = NULL;
 static SDL_Texture *g_tex2 = NULL;
+static int g_t2f32 = 0; /* 1 si g_tex2 es de 32 bits */
 static int g_tw = 0, g_th = 0;
 static int g_t2w = 0, g_t2h = 0;
 static SDL_threadID g_main = 0;
@@ -1584,6 +1585,31 @@ static void __attribute__((used)) curvar_pantalla(int W, int H) {
 static int g_ec_key[24];
 static int g_ec_ok = 0;
 
+
+/* Formato de 32 bits que usa el renderizador por software para la pantalla (ARGB8888 o ABGR8888).
+   Subir la imagen escalada ya en ese formato evita convertir 16 -> 32 bits pixel a pixel en cada copia.
+   Con /data/swan/tex16.txt se vuelve al formato de 16 bits anterior. Devuelve 0 si no aplica. */
+static Uint32 g_fmt32 = 0;
+static int g_fmt32_listo = 0;
+static Uint32 *g_s32 = NULL;
+static size_t g_s32_n = 0;
+static Uint32 g_lut32[65536];
+static int g_lut32_pf = -2; /* -2: tabla sin construir (g_pf puede valer -1) */
+static Uint32 formato32_nativo(void) {
+  if (g_fmt32_listo) return g_fmt32;
+  g_fmt32_listo = 1;
+  FILE *f16 = fopen("/data/swan/tex16.txt", "rb");
+  if (f16) { fclose(f16); esp("TEXTURA2: formato de 16 bits (tex16.txt)"); return 0; }
+  SDL_RendererInfo ri;
+  memset(&ri, 0, sizeof(ri));
+  if (R && SDL_GetRendererInfo(R, &ri) == 0 && ri.num_texture_formats > 0) {
+    Uint32 pf = ri.texture_formats[0];
+    if (pf == SDL_PIXELFORMAT_ARGB8888 || pf == SDL_PIXELFORMAT_RGB888) g_fmt32 = SDL_PIXELFORMAT_ARGB8888;
+    else if (pf == SDL_PIXELFORMAT_ABGR8888 || pf == SDL_PIXELFORMAT_BGR888) g_fmt32 = SDL_PIXELFORMAT_ABGR8888;
+  }
+  esp("TEXTURA2: formato de 32 bits=%s", g_fmt32 ? SDL_GetPixelFormatName(g_fmt32) : "no (16 bits)");
+  return g_fmt32;
+}
 static int escalar_propio(int kpedido, int *ow, int *oh) {
   if (g_sw == 0 || g_sh == 0) return 0;
   if (g_pf != 2 && g_pf != 0) return 0;
@@ -1725,14 +1751,48 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   if (g_crt) crt_lineas(W, H);
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
-    Uint32 fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
+    Uint32 f32 = formato32_nativo();
+    Uint32 fmt = f32 ? f32 : ((g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565);
     g_tex2 = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, W, H);
+    if (!g_tex2 && f32) { /* sin memoria o formato no valido: 16 bits como antes */
+      fmt = (g_pf == 0) ? SDL_PIXELFORMAT_ARGB1555 : SDL_PIXELFORMAT_RGB565;
+      g_tex2 = SDL_CreateTexture(R, fmt, SDL_TEXTUREACCESS_STREAMING, W, H);
+    }
+    g_t2f32 = (g_tex2 && fmt == f32 && f32) ? 1 : 0;
     g_t2w = W;
     g_t2h = H;
     esp("TEXTURA2 %dx%d k=%d ptr=%p", W, H, k, (void *)g_tex2);
   }
   if (!g_tex2) return 0;
-  SDL_UpdateTexture(g_tex2, NULL, g_sbuf, W * 2);
+  if (g_t2f32) {
+    size_t npx = (size_t)W * (size_t)H;
+    if (g_s32_n < npx) {
+      free(g_s32);
+      g_s32 = (Uint32 *)malloc(npx * 4);
+      g_s32_n = g_s32 ? npx : 0;
+    }
+    if (g_s32) {
+      if (g_lut32_pf != g_pf) {
+        for (int v = 0; v < 65536; v++) {
+          int r, g, b;
+          if (g_pf == 0) { r = (v >> 10) & 31; g = (v >> 5) & 31; b = v & 31; r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2); }
+          else { r = (v >> 11) & 31; g = (v >> 5) & 63; b = v & 31; r = (r << 3) | (r >> 2); g = (g << 2) | (g >> 4); b = (b << 3) | (b >> 2); }
+          g_lut32[v] = (g_fmt32 == SDL_PIXELFORMAT_ARGB8888)
+                           ? (0xFF000000u | ((Uint32)r << 16) | ((Uint32)g << 8) | (Uint32)b)
+                           : (0xFF000000u | ((Uint32)b << 16) | ((Uint32)g << 8) | (Uint32)r);
+        }
+        g_lut32_pf = g_pf;
+      }
+      const uint16_t *sp = g_sbuf;
+      Uint32 *dp = g_s32;
+      for (size_t i = 0; i < npx; i++) dp[i] = g_lut32[sp[i]];
+      SDL_UpdateTexture(g_tex2, NULL, g_s32, W * 4);
+    } else {
+      return 0;
+    }
+  } else {
+    SDL_UpdateTexture(g_tex2, NULL, g_sbuf, W * 2);
+  }
   g_ec_ok = 1;
   *ow = W;
   *oh = H;
