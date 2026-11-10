@@ -1636,7 +1636,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
   }
   {
     int key[24] = {(int)g_snap_ver, w, h, W, H, cr_t, cn, fill, g_suav, g_nitido ? 1 : 0, g_aa, g_nit, g_s2x ? 1 : 0, g_crt,
-                   g_bic ? 1 : 0, g_dd, g_resp, g_pf, g_forzar_W, g_forzar_H, g_modo, g_asp ? 1 : 0, 0, 0};
+                   g_bic ? 1 : 0, g_dd, g_resp, g_pf, g_forzar_W, g_forzar_H, g_modo, g_asp ? 1 : 0, g_curv, 0};
     if (g_ec_ok && g_tex2 && g_t2w == W && g_t2h == H && memcmp(key, g_ec_key, sizeof(key)) == 0) {
       *ow = W;
       *oh = H;
@@ -1718,6 +1718,7 @@ static int escalar_propio(int kpedido, int *ow, int *oh) {
     for (int r = 1; r < k; r++) memcpy(d + (size_t)r * W, d, (size_t)W * 2);
   }
   }
+  if (g_curv) curvar_pantalla(W, H);
   if (g_crt) crt_lineas(W, H);
   if (!g_tex2 || g_t2w != W || g_t2h != H) {
     if (g_tex2) SDL_DestroyTexture(g_tex2);
@@ -1986,7 +1987,7 @@ struct OpsCat {
 };
 static const OpsCat OPS_CAT[6] = {
     {"Pantalla", 0, 11, {3, 4, 15, 5, 6, 7, 8, 16, 25, 17, 11}},
-    {"Imagen", 2, 7, {18, 12, 26, 27, 28, 10, 29}},
+    {"Imagen", 2, 8, {18, 12, 26, 27, 28, 10, 29, 30}},
     {"Jugabilidad", 1, 4, {0, 1, 2, 22}},
     {"Control", 3, 2, {23, 24}},
     {"Sistema", 4, 3, {9, 14, 13}},
@@ -2885,6 +2886,7 @@ static void cont_cambiar(int d);
 static void sat_cambiar(int d);
 static void gam_cambiar(int d);
 static void resp_cambiar(int d);
+static void curv_cambiar(int d);
 static void brillo_cambiar(int d);
 static void ajustes_guardar_nombre(const char *nombre);
 static void ajustes_cargar_nombre(const char *nombre);
@@ -2919,6 +2921,7 @@ static void pop_ajustar(int idx, int dx) {
     case 27: sat_cambiar(dx); break;
     case 28: gam_cambiar(dx); break;
     case 29: resp_cambiar(dx); break;
+    case 30: curv_cambiar(dx); break;
     case 18: brillo_cambiar(dx); break;
     default: break;
   }
@@ -3570,6 +3573,13 @@ static void resp_cambiar(int d) {
   snprintf(g_msg, sizeof(g_msg), "%s", g_resp ? "Resplandor activado (usa el escalado bicubico)" : "Resplandor desactivado");
 }
 
+static void curv_cambiar(int d) {
+  g_curv = (g_curv + d + 3) % 3;
+  guardar_num("/data/swan/curv.txt", g_curv);
+  esp("MENU: curvatura = %d", g_curv);
+  snprintf(g_msg, sizeof(g_msg), "Curvatura: %s", g_curv == 0 ? "No" : (g_curv == 1 ? "Suave" : "Fuerte"));
+}
+
 static void fps_cambiar(void) {
   g_fps_on = !g_fps_on;
   guardar_num("/data/swan/fps.txt", g_fps_on);
@@ -3815,6 +3825,10 @@ static void menu_refrescar(void) {
     const char *rn_[3] = {"No", "Suave", "Fuerte"};
     snprintf(g_ml[29], sizeof(g_ml[29]), "Resplandor: %s  (izq/der)", rn_[g_resp % 3]);
   }
+  {
+    const char *cn_[3] = {"No", "Suave", "Fuerte"};
+    snprintf(g_ml[30], sizeof(g_ml[30]), "Curvatura: %s  (izq/der)", cn_[g_curv % 3]);
+  }
   snprintf(g_ml[18], sizeof(g_ml[18]), "Brillo: %+d  (izq/der)", g_brillo);
   snprintf(g_ml[23], sizeof(g_ml[23]), "Jugador 1: %s", g_pad >= 0 ? "conectado" : "no");
   snprintf(g_ml[24], sizeof(g_ml[24]), "Jugador 2: %s", g_pad2 >= 0 ? "conectado" : "no");
@@ -3909,6 +3923,7 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 27) sat_cambiar(dx);
       else if (g_menu_sel == 28) gam_cambiar(dx);
       else if (g_menu_sel == 29) resp_cambiar(dx);
+      else if (g_menu_sel == 30) curv_cambiar(dx);
       else if (g_menu_sel == 18) brillo_cambiar(dx);
       else if (g_menu_sel == 22) disco_cambiar(dx);
     }
@@ -3942,6 +3957,7 @@ static void pausa_menu(void) {
       else if (g_menu_sel == 27) sat_cambiar(1);
       else if (g_menu_sel == 28) gam_cambiar(1);
       else if (g_menu_sel == 29) resp_cambiar(1);
+      else if (g_menu_sel == 30) curv_cambiar(1);
       else if (g_menu_sel == 18) brillo_cambiar(1);
       else if (g_menu_sel == 19) salir = 1;
       else if (g_menu_sel == 22) disco_cambiar(1);
@@ -4306,6 +4322,7 @@ inicio_menu:;
       cargar_ajuste("/data/swan/sat.txt", 4, 2, &g_sat);
       cargar_ajuste("/data/swan/gam.txt", 4, 2, &g_gam);
       cargar_ajuste("/data/swan/resp.txt", 2, 0, &g_resp);
+      cargar_ajuste("/data/swan/curv.txt", 2, 0, &g_curv);
       FILE *fb = fopen("/data/swan/brillo.txt", "rb");
       if (fb) {
         int c = fgetc(fb);
