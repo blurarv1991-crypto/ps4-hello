@@ -235,6 +235,8 @@ static int g_marco_on = 1;   /* L2+R2+R3 activa/desactiva el marco */
 static int g_forzar_W = 0, g_forzar_H = 0; /* >0: escalar_propio produce exactamente ese tamano (marco) */
 static int g_tex_lin = 0;    /* 1 si g_tex se creo con filtro lineal */
 static SDL_Rect g_marco_hueco = {0, 0, 0, 0};
+static SDL_Window *g_ventana = NULL;
+static int g_pres_rect = 0; /* con /data/swan/presente_rect.txt solo se vuelca a pantalla el hueco del marco */
 static int g_marco_siempre = 0; /* con /data/swan/marco_siempre.txt el marco se repinta entero en cada cuadro */
 static int g_marco_lin = 1;  /* 1 = filtro lineal; con /data/swan/marco_rapido.txt pasa a 0 (mas rapido) */
 #define MARCO_MAX_BANDAS 200
@@ -1828,6 +1830,8 @@ static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
     if (fr) { fclose(fr); g_marco_lin = 0; }
     FILE *fs = fopen("/data/swan/marco_siempre.txt", "rb");
     if (fs) { fclose(fs); g_marco_siempre = 1; }
+    FILE *fp = fopen("/data/swan/presente_rect.txt", "rb");
+    if (fp) { fclose(fp); g_pres_rect = 1; esp("PRESENTE: solo el hueco del marco (presente_rect.txt)"); }
   }
   /* lo transparente queda en negro puro (asi el marco se puede copiar sin mezclar fuera del hueco) */
   for (long long q = 0; q < (long long)w * h; q++) {
@@ -2393,7 +2397,16 @@ static void dibujar_juego_interno(void) {
     texto(5, 5, t);
   }
   double t2 = ahora_us();
-  SDL_RenderPresent(R);
+  if (g_pres_rect && solo_hueco && g_ventana) {
+    /* con el marco ya pintado, solo se vuelca el hueco (menos pixeles que copiar a la pantalla) */
+#if SDL_VERSION_ATLEAST(2, 0, 10)
+    SDL_RenderFlush(R);
+#endif
+    SDL_Rect rr = g_marco_hueco;
+    SDL_UpdateWindowSurfaceRects(g_ventana, &rr, 1);
+  } else {
+    SDL_RenderPresent(R);
+  }
   double t3 = ahora_us();
   a_cop += t1 - t0;
   a_pre += t3 - t2;
@@ -4163,6 +4176,7 @@ static void cierre_final(void) {
 int main(void) {
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *w = SDL_CreateWindow("swan", 0, 0, 1920, 1080, 0);
+  g_ventana = w;
   R = SDL_CreateRenderer(w, -1, 0);
   if (!R) R = SDL_CreateRenderer(w, -1, SDL_RENDERER_SOFTWARE);
   g_main = SDL_ThreadID();
