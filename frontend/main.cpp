@@ -1988,7 +1988,7 @@ struct OpsCat {
 static const OpsCat OPS_CAT[6] = {
     {"Pantalla", 0, 11, {3, 4, 15, 5, 6, 7, 8, 16, 25, 17, 11}},
     {"Imagen", 2, 8, {18, 12, 26, 27, 28, 10, 29, 30}},
-    {"Jugabilidad", 1, 4, {0, 1, 2, 22}},
+    {"Memory card", 1, 4, {0, 1, 2, 22}},
     {"Control", 3, 2, {23, 24}},
     {"Sistema", 4, 3, {9, 14, 13}},
     {"Otros", 5, 3, {19, 20, 21}},
@@ -2037,6 +2037,34 @@ static void ops_fill(int x, int y, int w, int h) {
   SDL_RenderFillRect(R, &r);
 }
 
+/* Linea gruesa (unos 4 px) para el icono de la memory card */
+static void ops_linea(int x0, int y0, int x1, int y1) {
+  for (int o = 0; o < 4; o++) {
+    SDL_RenderDrawLine(R, x0 + o, y0, x1 + o, y1);
+    SDL_RenderDrawLine(R, x0, y0 + o, x1, y1 + o);
+  }
+}
+
+/* Icono de memory card de PS1 (96x96): tarjeta vertical con la esquina superior derecha cortada,
+   etiqueta arriba y contactos abajo */
+static void ops_icono_memcard(int x, int y, Uint8 a) {
+  SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(R, 255, 255, 255, a);
+  ops_linea(x + 18, y + 8, x + 60, y + 8);
+  ops_linea(x + 60, y + 8, x + 78, y + 26);
+  ops_linea(x + 78, y + 26, x + 78, y + 88);
+  ops_linea(x + 18, y + 88, x + 78, y + 88);
+  ops_linea(x + 18, y + 8, x + 18, y + 88);
+  SDL_SetRenderDrawColor(R, 255, 255, 255, (Uint8)(a / 3));
+  SDL_Rect et = {x + 30, y + 22, 36, 24};
+  SDL_RenderFillRect(R, &et);
+  SDL_SetRenderDrawColor(R, 255, 255, 255, a);
+  for (int i = 0; i < 4; i++) {
+    SDL_Rect ct = {x + 24 + i * 13, y + 62, 9, 18};
+    SDL_RenderFillRect(R, &ct);
+  }
+}
+
 static void dibujar_ops_nuevo(void) {
   SDL_RenderSetScale(R, 1, 1);
   SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
@@ -2059,7 +2087,8 @@ static void dibujar_ops_nuevo(void) {
     SDL_Rect sr = {0, OPS_CAT[c].icono * 96, 96, 96};
     SDL_Rect dr = {160, cy - 48, 96, 96};
     SDL_SetTextureAlphaMod(g_ops_iconos, (Uint8)(c == cat ? 255 : 185));
-    SDL_RenderCopy(R, g_ops_iconos, &sr, &dr);
+    if (c == 2) ops_icono_memcard(dr.x, dr.y, (Uint8)(c == cat ? 255 : 185)); /* seccion Memory card */
+    else SDL_RenderCopy(R, g_ops_iconos, &sr, &dr);
     if (c == cat) texto_col(300.0f, (float)(cy - 10), 3, 255, 255, 255, OPS_CAT[c].nombre);
     else texto_col(300.0f, (float)(cy - 10), 3, 205, 205, 228, OPS_CAT[c].nombre);
   }
@@ -3885,6 +3914,20 @@ static void pausa_menu(void) {
     unsigned m = g_mask;
     unsigned nw = m & ~prev;
     prev = m;
+    {
+      /* mantener pulsado arriba/abajo (y izq/der en las barras) repite la pulsacion */
+      static unsigned t_rep[8];
+      unsigned tr = SDL_GetTicks();
+      for (int b = 4; b <= 7; b++) {
+        if (!((m >> b) & 1u)) continue;
+        if ((nw >> b) & 1u) { t_rep[b] = tr + 330; continue; }
+        if (b >= 6) {
+          int s_ = g_menu_sel;
+          if (s_ != 2 && s_ != 18 && s_ != 26 && s_ != 27 && s_ != 28) continue;
+        }
+        if (tr >= t_rep[b]) { nw |= 1u << b; t_rep[b] = tr + 70; }
+      }
+    }
     int salir = 0;
     if (g_ops_ui) {
       if (nw & (1u << 10)) { g_ops_cat = (g_ops_cat + 5) % 6; g_ops_fila = 0; }
@@ -3982,7 +4025,7 @@ static void pausa_menu(void) {
         t_dib = tn;
       }
     }
-    SDL_Delay(16);
+    SDL_Delay(6);
   }
   g_menu_vis = 0;
   ajustes_guardar_nombre(g_juego_id);
