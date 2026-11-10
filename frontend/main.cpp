@@ -1588,7 +1588,8 @@ static int g_ec_ok = 0;
 
 /* Formato de 32 bits que usa el renderizador por software para la pantalla (ARGB8888 o ABGR8888).
    Subir la imagen escalada ya en ese formato evita convertir 16 -> 32 bits pixel a pixel en cada copia.
-   Con /data/swan/tex16.txt se vuelve al formato de 16 bits anterior. Devuelve 0 si no aplica. */
+   En las pruebas en la PS4 resulto MAS lento que el de 16 bits, asi que ahora solo se usa si existe
+   /data/swan/tex32.txt. Devuelve 0 si no aplica. */
 static Uint32 g_fmt32 = 0;
 static int g_fmt32_listo = 0;
 static Uint32 *g_s32 = NULL;
@@ -1598,8 +1599,9 @@ static int g_lut32_pf = -2; /* -2: tabla sin construir (g_pf puede valer -1) */
 static Uint32 formato32_nativo(void) {
   if (g_fmt32_listo) return g_fmt32;
   g_fmt32_listo = 1;
-  FILE *f16 = fopen("/data/swan/tex16.txt", "rb");
-  if (f16) { fclose(f16); esp("TEXTURA2: formato de 16 bits (tex16.txt)"); return 0; }
+  FILE *f32 = fopen("/data/swan/tex32.txt", "rb");
+  if (!f32) { esp("TEXTURA2: formato de 16 bits"); return 0; }
+  fclose(f32);
   SDL_RendererInfo ri;
   memset(&ri, 0, sizeof(ri));
   if (R && SDL_GetRendererInfo(R, &ri) == 0 && ri.num_texture_formats > 0) {
