@@ -1871,8 +1871,8 @@ static int cargar_marco_archivo(const char *ruta_png, const char *ruta_txt) {
       memset(&mri, 0, sizeof(mri));
       if (SDL_GetRendererInfo(R, &mri) == 0 && mri.num_texture_formats > 0) {
         pref = mri.texture_formats[0];
-        if (pref == SDL_PIXELFORMAT_XRGB8888) mfmt = SDL_PIXELFORMAT_ARGB8888;
-        else if (pref == SDL_PIXELFORMAT_XBGR8888) mfmt = SDL_PIXELFORMAT_ABGR8888;
+        if (pref == SDL_PIXELFORMAT_RGB888) mfmt = SDL_PIXELFORMAT_ARGB8888;
+        else if (pref == SDL_PIXELFORMAT_BGR888) mfmt = SDL_PIXELFORMAT_ABGR8888;
         else if (SDL_BYTESPERPIXEL(pref) == 4 && SDL_ISPIXELFORMAT_ALPHA(pref)) mfmt = pref;
       }
     }
